@@ -1,0 +1,14 @@
+node_modules/
+data/
+*.db
+*.db-*
+ADMIN_CREDENTIALS.txt
+RENDER_ADMIN_CREDENTIALS.txt
+*CREDENTIALS*.txt
+.env
+.env.*
+screens/
+*.log
+.DS_Store
+playwright-report/
+test-results/

@@ -1,0 +1,28 @@
+{
+  "name": "card-rank-app",
+  "version": "1.0.0",
+  "description": "多人扑克牌等级展示系统 - 邀请制成员 + 管理员控牌",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "setup": "node scripts/setup-admin.js",
+    "test:e2e": "node scripts/e2e-test.js",
+    "test:smoke": "node scripts/smoke-test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^10.0.0",
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "pg": "^8.23.1",
+    "uuid": "^11.0.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  }
+}
