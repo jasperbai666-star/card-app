@@ -131,6 +131,7 @@ app.get('/healthz', ah(async (_req, res) => {
     await db.all('SELECT id FROM chat_messages ORDER BY id DESC LIMIT 1');
     await db.all('SELECT id FROM announcements ORDER BY id DESC LIMIT 1');
     await db.all('SELECT badge_key FROM user_achievements LIMIT 1');
+    await db.all('SELECT user_id FROM jump_scores LIMIT 1');
   } catch (e) {
     return res.status(500).json({ ok: false, error: 'schema', detail: String(e.message || e).slice(0, 120) });
   }
@@ -459,6 +460,11 @@ const announcementLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 40, standardHeaders: 'draft-7', legacyHeaders: false,
   keyGenerator: (req) => 'ann' + (req.session?.userId || 'anon'),
   handler: limitJson('公告操作太频繁，请稍后再试'),
+});
+const jumpScoreLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: 8, standardHeaders: 'draft-7', legacyHeaders: false,
+  keyGenerator: (req) => 'jump' + (req.session?.userId || 'anon'),
+  handler: limitJson('提交太频繁，请稍后再试'),
 });
 const sensitiveLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false,
@@ -1126,6 +1132,7 @@ app.delete('/api/admin/members/:id', requireAdmin, ah(async (req, res) => {
     await tx.run(`DELETE FROM chat_mutes WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM user_achievements WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM announcement_reads WHERE user_id = ?`, id);
+    await tx.run(`DELETE FROM jump_scores WHERE user_id = ?`, id);
     // Codes the member used: detach and mark revoked so they can never be re-used.
     await tx.run(`UPDATE invite_codes SET used_by = NULL, used_at = NULL, revoked = 1 WHERE used_by = ?`, id);
     // Codes the member issued: revoke unused ones and detach creator. Members they invited keep
@@ -1473,6 +1480,128 @@ app.get('/api/admin/members/:id/achievements', requireAdmin, ah(async (req, res)
     badges,
     unlocked: badges.filter((b) => b.unlocked).length,
     total: badges.length,
+  });
+}));
+
+
+// ---------- Jump Jump (跳一跳) ----------
+const JUMP_MAX_SCORE = 500;
+const JUMP_MAX_DELTA = 120; // one run cannot raise best by more than this vs previous best
+
+function jumpAliasFor(req) {
+  if (req.user.role === 'admin') return '管理员';
+  return String(req.session.chatAlias || '匿名玩家').slice(0, 24);
+}
+
+app.get('/api/jump/me', requireAuth, ah(async (req, res) => {
+  const row = await db.get('SELECT * FROM jump_scores WHERE user_id = ?', req.user.id);
+  res.json({
+    best: row ? Number(row.best_score) : 0,
+    gamesPlayed: row ? Number(row.games_played) : 0,
+    alias: row?.alias || jumpAliasFor(req),
+    proThreshold: achievements.JUMP_PRO_SCORE,
+  });
+}));
+
+app.get('/api/jump/leaderboard', requireAuth, ah(async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+  const rows = await db.all(
+    `SELECT j.user_id, j.best_score, j.alias, j.best_at, j.games_played,
+            u.username, u.display_name, u.role
+     FROM jump_scores j
+     JOIN users u ON u.id = j.user_id
+     WHERE j.best_score > 0 AND u.disabled = 0
+     ORDER BY j.best_score DESC, j.best_at ASC
+     LIMIT ?`,
+    limit
+  );
+  const isAdmin = req.user.role === 'admin';
+  res.json({
+    leaderboard: rows.map((r, i) => ({
+      rank: i + 1,
+      score: Number(r.best_score),
+      alias: r.role === 'admin' ? '管理员' : (r.alias || '匿名玩家'),
+      bestAt: r.best_at,
+      gamesPlayed: Number(r.games_played || 0),
+      // identity only for admins
+      ...(isAdmin ? {
+        userId: r.user_id,
+        username: r.username,
+        displayName: r.display_name || r.username,
+        role: r.role,
+      } : {}),
+      me: r.user_id === req.user.id,
+    })),
+  });
+}));
+
+app.post('/api/jump/score', requireAuth, jumpScoreLimiter, ah(async (req, res) => {
+  const score = Number(req.body?.score);
+  const hops = Number(req.body?.hops);
+  const durationMs = Number(req.body?.durationMs);
+  if (!Number.isFinite(score) || score < 0 || score !== Math.floor(score)) {
+    return res.status(400).json({ error: '分数无效' });
+  }
+  if (score > JUMP_MAX_SCORE) return res.status(400).json({ error: '分数超出合理范围' });
+  if (Number.isFinite(hops) && hops >= 0) {
+    if (hops > JUMP_MAX_SCORE + 5) return res.status(400).json({ error: '跳跃次数异常' });
+    // score roughly <= hops * 3 (center + combo padding)
+    if (score > hops * 3 + 5) return res.status(400).json({ error: '分数与跳跃次数不匹配' });
+  }
+  if (Number.isFinite(durationMs) && durationMs > 0) {
+    // ~1 hop / 350ms absolute floor; reject insanely fast high scores
+    if (score >= 10 && durationMs < score * 250) {
+      return res.status(400).json({ error: '用时过短，分数未采纳' });
+    }
+  }
+
+  const alias = jumpAliasFor(req);
+  const prev = await db.get('SELECT * FROM jump_scores WHERE user_id = ?', req.user.id);
+  const prevBest = prev ? Number(prev.best_score) : 0;
+  if (score > prevBest + JUMP_MAX_DELTA && score > 30) {
+    return res.status(400).json({ error: '单局提升过大，请再接再厉（分次刷新纪录）' });
+  }
+
+  let best = prevBest;
+  let isNewBest = false;
+  if (!prev) {
+    await db.run(
+      `INSERT INTO jump_scores (user_id, best_score, games_played, alias, best_at, updated_at)
+       VALUES (?, ?, 1, ?, ${NOW}, ${NOW})`,
+      req.user.id, score, alias
+    );
+    best = score;
+    isNewBest = score > 0;
+  } else {
+    isNewBest = score > prevBest;
+    best = Math.max(prevBest, score);
+    if (isNewBest) {
+      await db.run(
+        `UPDATE jump_scores SET best_score = ?, games_played = games_played + 1, alias = ?, best_at = ${NOW}, updated_at = ${NOW}
+         WHERE user_id = ?`,
+        score, alias, req.user.id
+      );
+    } else {
+      await db.run(
+        `UPDATE jump_scores SET games_played = games_played + 1, alias = ?, updated_at = ${NOW}
+         WHERE user_id = ?`,
+        alias, req.user.id
+      );
+    }
+  }
+
+  const keys = ['jump_newbie'];
+  if (best >= achievements.JUMP_PRO_SCORE) keys.push('jump_pro');
+  const newly = await notifyAchievements(req.user.id, keys);
+
+  const row = await db.get('SELECT * FROM jump_scores WHERE user_id = ?', req.user.id);
+  res.json({
+    ok: true,
+    best: Number(row.best_score),
+    gamesPlayed: Number(row.games_played),
+    isNewBest,
+    accepted: score,
+    newBadges: newly,
   });
 }));
 

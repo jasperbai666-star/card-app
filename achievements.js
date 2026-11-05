@@ -47,12 +47,25 @@ const BADGES = [
     description: '当前牌面达到 Q / K / 小王 / 大王。',
     icon: '👑',
   },
+  {
+    key: 'jump_newbie',
+    name: '跳一跳新手',
+    description: '完成至少一局跳一跳小游戏。',
+    icon: '🕹️',
+  },
+  {
+    key: 'jump_pro',
+    name: '跳一跳高手',
+    description: '跳一跳单局得分达到 50 分。',
+    icon: '🏆',
+  },
 ];
 
 const BADGE_MAP = Object.fromEntries(BADGES.map((b) => [b.key, b]));
 
 /** Q=12 and above count as 高阶牌面. */
 const HIGH_CARD_LEVEL = 12;
+const JUMP_PRO_SCORE = 50;
 
 function publicBadge(def, unlockedAt = null) {
   return {
@@ -173,6 +186,12 @@ async function backfillAll(db) {
 
     if (levelOf(m.card_rank) >= HIGH_CARD_LEVEL) keys.push('high_card');
 
+    try {
+      const js = await db.get('SELECT best_score, games_played FROM jump_scores WHERE user_id = ?', m.id);
+      if (js && Number(js.games_played || 0) >= 1) keys.push('jump_newbie');
+      if (js && Number(js.best_score || 0) >= JUMP_PRO_SCORE) keys.push('jump_pro');
+    } catch (_) { /* table may not exist yet during first migrate */ }
+
     const neu = await award(db, m.id, keys);
     awarded += neu.length;
   }
@@ -183,6 +202,7 @@ module.exports = {
   BADGES,
   BADGE_MAP,
   HIGH_CARD_LEVEL,
+  JUMP_PRO_SCORE,
   publicBadge,
   award,
   listForUser,

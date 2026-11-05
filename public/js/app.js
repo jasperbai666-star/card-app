@@ -439,6 +439,17 @@
           <div class="ach-grid" id="achGrid"><div class="mp-skel"></div></div>
         </section>
 
+        <section class="mp-glass mp-wide mp-jump" id="jumpPanel">
+          <div class="mp-head">
+            <h2>小游戏 · 跳一跳</h2>
+            <span class="mp-chip gold" id="jumpBestChip">最佳 0</span>
+          </div>
+          <p class="mp-fine">按住蓄力、松手起跳。落在下一座平台得分，踩中圆心额外加分。排行榜对成员只显示匿名代号。</p>
+          <div id="jumpGameRoot" class="jg-root"></div>
+          <div class="mp-head" style="margin-top:14px"><h2>排行榜</h2><span class="mp-chip">TOP 20</span></div>
+          <div id="jumpBoard"><div class="mp-skel"></div></div>
+        </section>
+
         <div class="mp-grid">
           ${window.ChatUI ? ChatUI.memberShell() : ''}
           <section class="mp-glass mp-inviter">
@@ -511,6 +522,7 @@
     loadMyInvite();
     loadAnnouncements();
     loadMyAchievements();
+    loadJumpGame();
     const readAllBtn = document.getElementById('announceReadAll');
     if (readAllBtn) readAllBtn.onclick = async () => {
       try {
@@ -737,6 +749,64 @@
     }
   }
 
+
+  async function loadJumpGame() {
+    const root = document.getElementById('jumpGameRoot');
+    const chip = document.getElementById('jumpBestChip');
+    const board = document.getElementById('jumpBoard');
+    if (!root || !window.JumpGame) return;
+    let best = 0;
+    try {
+      const me = await api('/api/jump/me');
+      best = Number(me.best || 0);
+      if (chip) chip.textContent = '最佳 ' + best;
+    } catch (_) {}
+    if (root._jg) { try { root._jg.destroy(); } catch (_) {} }
+    JumpGame.mount(root, {
+      best,
+      onGameOver: async ({ score, hops, durationMs }) => {
+        try {
+          const r = await api('/api/jump/score', {
+            method: 'POST',
+            body: { score, hops, durationMs },
+          });
+          if (chip) chip.textContent = '最佳 ' + r.best;
+          if (root._jg) root._jg.setBest(r.best);
+          if (r.isNewBest) toast('🏆 新纪录 ' + r.best);
+          if (r.newBadges && r.newBadges.length) {
+            r.newBadges.forEach((b) => toast('🏅 解锁成就：' + b.name));
+            loadMyAchievements();
+          }
+          loadJumpBoard();
+        } catch (ex) {
+          toast(ex.message || '分数提交失败');
+        }
+      },
+    });
+    loadJumpBoard();
+  }
+
+  async function loadJumpBoard() {
+    const board = document.getElementById('jumpBoard');
+    if (!board) return;
+    try {
+      const r = await api('/api/jump/leaderboard?limit=20');
+      const list = r.leaderboard || [];
+      if (!list.length) {
+        board.innerHTML = `<div class="mp-empty"><div class="mp-empty-ico">🕹️</div><div>暂无成绩</div><p class="mp-fine">完成一局后会出现在这里</p></div>`;
+        return;
+      }
+      board.innerHTML = `<ol class="jg-board">${list.map((row) => `
+        <li class="${row.me ? 'me' : ''}">
+          <span class="jg-rank">${row.rank}</span>
+          <span class="jg-alias">${escapeHtml(row.alias)}${row.me ? ' · 我' : ''}</span>
+          <span class="jg-pts">${row.score}</span>
+        </li>`).join('')}</ol>`;
+    } catch (ex) {
+      board.innerHTML = `<div class="empty">${escapeHtml(ex.message)}</div>`;
+    }
+  }
+
   // ---------- Admin ----------
   function renderAdmin() {
     history.replaceState(null, '', '/admin');
@@ -758,6 +828,7 @@
           <button class="tab" data-tab="suggestions">建议 / 要求</button>
           <button class="tab" data-tab="invites">邀请码</button>
           <button class="tab" data-tab="announcements">公告栏</button>
+          <button class="tab" data-tab="jump">跳一跳</button>
           <button class="tab" data-tab="chat">匿名聊天</button>
           <button class="tab" data-tab="security">安全中心</button>
         </div>
@@ -787,6 +858,7 @@
       suggestions: renderSuggestionsTab,
       invites: renderInvitesTab,
       announcements: renderAnnouncementsTab,
+      jump: renderJumpAdminTab,
       chat: renderChatTab,
       security: renderSecurityTab,
     };
@@ -830,7 +902,7 @@
                       <div style="font-size:.78rem;color:var(--muted)">@${escapeHtml(m.username)}</div>
                     </td>
                     <td class="inviter-cell">${m.invitedBy ? (m.invitedBy.role === 'admin' ? '<span class="badge badge-handled">管理员</span>' : escapeHtml(m.invitedBy.name)) : '未知'}</td>
-                    <td class="ach-cell"><span class="badge badge-pending" title="${escapeHtml((m.achievements?.keys || []).join(', '))}">🏅 ${(m.achievements && m.achievements.unlocked) || 0}/${(m.achievements && m.achievements.total) || 7}</span></td>
+                    <td class="ach-cell"><span class="badge badge-pending" title="${escapeHtml((m.achievements?.keys || []).join(', '))}">🏅 ${(m.achievements && m.achievements.unlocked) || 0}/${(m.achievements && m.achievements.total) || 0}</span></td>
                     <td>${CardsUI.mini(m.card)}</td>
                     <td>
                       <div class="form-inline">
@@ -1121,6 +1193,58 @@
     '2fa_reset_by_admin': '管理员重置2FA', forced_logout_by_admin: '被强制下线', unlocked_by_admin: '管理员解锁', display_name_changed: '修改姓名', member_invite_created: '成员生成邀请码', member_invite_revoked: '成员撤销邀请码', announcement_created: '发布公告', announcement_updated: '编辑公告', announcement_deleted: '删除公告', announcement_pinned: '置顶公告', announcement_unpinned: '取消置顶', logout_others: '退出其他设备',
   };
 
+
+
+  async function renderJumpAdminTab() {
+    const body = document.getElementById('tabBody');
+    if (!body) return;
+    body.innerHTML = `<div class="panel"><div class="empty">加载中…</div></div>`;
+    try {
+      const [me, board] = await Promise.all([
+        api('/api/jump/me'),
+        api('/api/jump/leaderboard?limit=30'),
+      ]);
+      body.innerHTML = `
+        <div class="panel">
+          <h2>跳一跳 · 管理端</h2>
+          <p class="muted-sm">你可以自己玩；排行榜对你显示真实姓名。成员端仅见匿名代号。</p>
+          <div class="mp-chip gold" style="display:inline-block;margin:8px 0">我的最佳 ${Number(me.best || 0)} · 已玩 ${Number(me.gamesPlayed || 0)} 局</div>
+          <div id="jumpGameRoot" class="jg-root"></div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h2>排行榜（含身份）</h2>
+          <div id="jumpBoardAdmin"></div>
+        </div>`;
+      const list = board.leaderboard || [];
+      const box = document.getElementById('jumpBoardAdmin');
+      box.innerHTML = list.length
+        ? `<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>代号</th><th>成员</th><th>分数</th><th>局数</th></tr></thead><tbody>
+            ${list.map((row) => `<tr>
+              <td>${row.rank}</td>
+              <td>${escapeHtml(row.alias)}</td>
+              <td>${escapeHtml(row.displayName || row.username || '—')}<div class="muted-sm">@${escapeHtml(row.username || '')}</div></td>
+              <td><strong>${row.score}</strong></td>
+              <td>${row.gamesPlayed || 0}</td>
+            </tr>`).join('')}
+          </tbody></table></div>`
+        : '<div class="empty">暂无成绩</div>';
+      const root = document.getElementById('jumpGameRoot');
+      if (window.JumpGame && root) {
+        JumpGame.mount(root, {
+          best: me.best || 0,
+          onGameOver: async ({ score, hops, durationMs }) => {
+            try {
+              const r = await api('/api/jump/score', { method: 'POST', body: { score, hops, durationMs } });
+              toast(r.isNewBest ? '🏆 新纪录 ' + r.best : '已记录本局 ' + score);
+              renderJumpAdminTab();
+            } catch (ex) { toast(ex.message); }
+          },
+        });
+      }
+    } catch (ex) {
+      body.innerHTML = `<div class="panel"><div class="empty">${escapeHtml(ex.message)}</div></div>`;
+    }
+  }
 
   async function renderAnnouncementsTab() {
     const body = document.getElementById('tabBody');

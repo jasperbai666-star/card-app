@@ -245,6 +245,23 @@ async function main() {
     await page.waitForTimeout(400);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'achievements.png'), fullPage: true });
     ok('screenshot achievements.png');
+    // seed a jump score so leaderboard isn't empty
+    await page.evaluate(async () => {
+      await fetch('/api/jump/score', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ score: 12, hops: 10, durationMs: 12000 }),
+      });
+    });
+    await page.waitForSelector('#jumpPanel', { timeout: 10000 });
+    await page.locator('#jumpPanel').scrollIntoViewIfNeeded();
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'jump-game.png'), fullPage: true });
+    ok('screenshot jump-game.png');
+    await page.locator('#jumpBoard').scrollIntoViewIfNeeded();
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'jump-leaderboard.png'), fullPage: true });
+    ok('screenshot jump-leaderboard.png');
     await ctx.close();
   }
 

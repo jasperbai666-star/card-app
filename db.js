@@ -273,6 +273,15 @@ CREATE TABLE IF NOT EXISTS user_achievements (
   PRIMARY KEY (user_id, badge_key)
 );
 CREATE INDEX IF NOT EXISTS idx_ach_user ON user_achievements(user_id);
+CREATE TABLE IF NOT EXISTS jump_scores (
+  user_id INTEGER PRIMARY KEY,
+  best_score INTEGER NOT NULL DEFAULT 0,
+  games_played INTEGER NOT NULL DEFAULT 0,
+  alias TEXT,
+  best_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_jump_best ON jump_scores(best_score DESC);
 `;
 
 
@@ -302,6 +311,15 @@ CREATE TABLE IF NOT EXISTS user_achievements (
   PRIMARY KEY (user_id, badge_key)
 );
 CREATE INDEX IF NOT EXISTS idx_ach_user ON user_achievements(user_id);
+CREATE TABLE IF NOT EXISTS jump_scores (
+  user_id INTEGER PRIMARY KEY,
+  best_score INTEGER NOT NULL DEFAULT 0,
+  games_played INTEGER NOT NULL DEFAULT 0,
+  alias TEXT,
+  best_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (${PG_NOW})
+);
+CREATE INDEX IF NOT EXISTS idx_jump_best ON jump_scores(best_score DESC);
 `;
 
 const POST_MIGRATIONS = [
@@ -337,7 +355,7 @@ if (isPg) {
     async all(sql, ...p) { return (await q(toPg(sql), p)).rows; },
     async run(sql, ...p) {
       let s = toPg(sql);
-      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+(ws_tokens|user_sessions|login_throttle|chat_images|chat_mutes|announcement_reads|user_achievements)/i.test(s);
+      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+(ws_tokens|user_sessions|login_throttle|chat_images|chat_mutes|announcement_reads|user_achievements|jump_scores)/i.test(s);
       if (isInsert) s += ' RETURNING id';
       const r = await q(s, p);
       return { changes: r.rowCount, lastInsertRowid: isInsert && r.rows[0] ? Number(r.rows[0].id) : undefined };

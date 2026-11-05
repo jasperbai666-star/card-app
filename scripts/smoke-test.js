@@ -331,7 +331,7 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     r = await api(mA, 'GET', '/api/my/achievements');
     const badges = r.data.badges || [];
     const unlocked = Object.fromEntries(badges.filter((b) => b.unlocked).map((b) => [b.key, true]));
-    check('achievements: catalog has 7 badges', badges.length === 7);
+    check('achievements: catalog has 9 badges', badges.length === 9);
     check('achievements: first_login unlocked', !!unlocked.first_login);
     check('achievements: first_chat unlocked after text', !!unlocked.first_chat);
     check('achievements: image_master unlocked after image', !!unlocked.image_master);
@@ -343,7 +343,7 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     const rowA = (r.data.members || []).find((m) => m.id === idA);
     check('admin member list shows achievement summary', !!rowA?.achievements && rowA.achievements.unlocked >= 5, JSON.stringify(rowA?.achievements));
     r = await api(admin, 'GET', `/api/admin/members/${idA}/achievements`);
-    check('admin can view member achievements detail', r.status === 200 && (r.data.badges || []).length === 7);
+    check('admin can view member achievements detail', r.status === 200 && (r.data.badges || []).length === 9);
     // cleanup announcements created here (soft-delete)
     for (const id of created.announcements || []) {
       await api(admin, 'DELETE', `/api/admin/announcements/${id}`);
@@ -351,6 +351,33 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     r = await api(mA, 'GET', '/api/announcements');
     check('deleted announcements hidden from members', !(r.data.announcements || []).some((a) => (created.announcements || []).includes(a.id)));
     memWsAnn.ws.close();
+  }
+
+  // --- jump jump ---
+  {
+    r = await api(mA, 'GET', '/api/jump/me');
+    check('jump: me returns best', r.status === 200 && r.data.best === 0);
+    r = await api(mA, 'POST', '/api/jump/score', { score: 3, hops: 3, durationMs: 5000 });
+    check('jump: accept modest score', r.status === 200 && r.data.best === 3 && r.data.isNewBest, JSON.stringify(r.data));
+    r = await api(mA, 'GET', '/api/my/achievements');
+    check('jump: newbie badge unlocked', (r.data.badges || []).some((b) => b.key === 'jump_newbie' && b.unlocked));
+    r = await api(mA, 'POST', '/api/jump/score', { score: 9999, hops: 3, durationMs: 5000 });
+    check('jump: absurd score rejected', r.status === 400);
+    r = await api(mA, 'POST', '/api/jump/score', { score: 40, hops: 2, durationMs: 8000 });
+    check('jump: score/hops mismatch rejected', r.status === 400);
+    r = await api(mA, 'POST', '/api/jump/score', { score: 20, hops: 18, durationMs: 2000 });
+    check('jump: too-fast high-ish score rejected', r.status === 400);
+    // build toward pro without huge delta: 3 -> +120 max, so 50 needs steps... allow 3+40? delta 120 from 3 allows up to 123
+    r = await api(mA, 'POST', '/api/jump/score', { score: 50, hops: 40, durationMs: 30000 });
+    check('jump: score 50 accepted for pro badge', r.status === 200 && r.data.best === 50, JSON.stringify(r.data));
+    r = await api(mA, 'GET', '/api/my/achievements');
+    check('jump: pro badge unlocked at 50', (r.data.badges || []).some((b) => b.key === 'jump_pro' && b.unlocked));
+    r = await api(mA, 'GET', '/api/jump/leaderboard');
+    const row = (r.data.leaderboard || []).find((x) => x.me);
+    check('jump: leaderboard shows me with alias only (no username)', r.status === 200 && row && row.score === 50 && row.alias && row.username === undefined);
+    r = await api(admin, 'GET', '/api/jump/leaderboard');
+    check('jump: admin leaderboard includes identity', (r.data.leaderboard || []).some((x) => x.username === ua && x.displayName));
+    check('member cannot forge without auth', (await api({}, 'POST', '/api/jump/score', { score: 10, hops: 5, durationMs: 5000 })).status === 401);
   }
 
   // --- session rotation ---
