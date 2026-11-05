@@ -124,7 +124,15 @@ app.use(
 
 app.use('/api', sec.csrfGuard);
 
-app.get('/healthz', (_req, res) => res.json({ ok: true }));
+app.get('/healthz', ah(async (_req, res) => {
+  // Touch chat schema so a missing migration fails health checks (and boot) loudly.
+  try {
+    await db.all('SELECT id FROM chat_messages ORDER BY id DESC LIMIT 1');
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: 'chat schema', detail: String(e.message || e).slice(0, 120) });
+  }
+  res.json({ ok: true });
+}));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- WebSocket ----------
@@ -762,27 +770,23 @@ app.get('/api/chat/me', requireAuth, (req, res) => {
 });
 
 app.get('/api/chat/messages', requireAuth, ah(async (req, res) => {
-  const before = req.query.before ? Number(req.query.before) : null;
+  // Avoid `WHERE (? IS NULL OR …)` — Postgres cannot infer the type of a bare NULL $1.
+  const beforeRaw = req.query.before != null && req.query.before !== '' ? Number(req.query.before) : null;
+  const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : null;
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
   const muted = await isMuted(req.user.id);
   const myAlias = await ensureChatAlias(req);
+  const base = `SELECT m.*, u.username, u.display_name FROM chat_messages m
+       LEFT JOIN users u ON u.id = m.user_id`;
   let rows;
   if (req.user.role === 'admin') {
-    rows = await db.all(
-      `SELECT m.*, u.username, u.display_name FROM chat_messages m
-       LEFT JOIN users u ON u.id = m.user_id
-       WHERE (? IS NULL OR m.id < ?)
-       ORDER BY m.id DESC LIMIT ?`,
-      before, before, limit
-    );
+    rows = before == null
+      ? await db.all(`${base} ORDER BY m.id DESC LIMIT ?`, limit)
+      : await db.all(`${base} WHERE m.id < ? ORDER BY m.id DESC LIMIT ?`, before, limit);
   } else {
-    rows = await db.all(
-      `SELECT m.*, u.username, u.display_name FROM chat_messages m
-       LEFT JOIN users u ON u.id = m.user_id
-       WHERE m.deleted_at IS NULL AND (? IS NULL OR m.id < ?)
-       ORDER BY m.id DESC LIMIT ?`,
-      before, before, limit
-    );
+    rows = before == null
+      ? await db.all(`${base} WHERE m.deleted_at IS NULL ORDER BY m.id DESC LIMIT ?`, limit)
+      : await db.all(`${base} WHERE m.deleted_at IS NULL AND m.id < ? ORDER BY m.id DESC LIMIT ?`, before, limit);
   }
   const list = rows.reverse().map((r) =>
     req.user.role === 'admin' ? chat.adminMessage(r) : chat.publicMessage(r)
@@ -825,7 +829,9 @@ app.post('/api/chat/images', requireAuth, chatUploadLimiter, ah(async (req, res)
   const alias = await ensureChatAlias(req);
   await db.transaction(async (tx) => {
     await tx.run(
-      `INSERT INTO chat_images (key, mime, bytes, size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ${NOW})`,
+      db.isPg
+        ? `INSERT INTO chat_images (key, mime, bytes, size, uploaded_by, created_at) VALUES (?, ?, ?::bytea, ?, ?, ${NOW})`
+        : `INSERT INTO chat_images (key, mime, bytes, size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ${NOW})`,
       key, sniffed.mime, buf, buf.length, req.user.id
     );
     const info = await tx.run(
@@ -928,8 +934,11 @@ app.post('/api/admin/chat/mutes', requireAdmin, adminWriteLimiter, ah(async (req
   const until = minutes == null ? null : sec.nowText(minutes * 60_000);
   const reason = req.body?.reason ? String(req.body.reason).trim().slice(0, 80) : null;
   await db.run(
-    `INSERT INTO chat_mutes (user_id, muted_until, muted_by, reason, created_at) VALUES (?, ?, ?, ?, ${NOW})
-     ON CONFLICT(user_id) DO UPDATE SET muted_until = excluded.muted_until, muted_by = excluded.muted_by, reason = excluded.reason, created_at = excluded.created_at`,
+    db.isPg
+      ? `INSERT INTO chat_mutes (user_id, muted_until, muted_by, reason, created_at) VALUES (?, ?::text, ?, ?::text, ${NOW})
+         ON CONFLICT(user_id) DO UPDATE SET muted_until = EXCLUDED.muted_until, muted_by = EXCLUDED.muted_by, reason = EXCLUDED.reason, created_at = EXCLUDED.created_at`
+      : `INSERT INTO chat_mutes (user_id, muted_until, muted_by, reason, created_at) VALUES (?, ?, ?, ?, ${NOW})
+         ON CONFLICT(user_id) DO UPDATE SET muted_until = excluded.muted_until, muted_by = excluded.muted_by, reason = excluded.reason, created_at = excluded.created_at`,
     userId, until, req.user.id, reason
   );
   // SQLite UPSERT works; for PG ON CONFLICT works with PRIMARY KEY. Good.

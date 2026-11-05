@@ -224,8 +224,14 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
   // --- anonymous chat ---
   {
     r = await api(mA, 'GET', '/api/chat/messages');
+    // Regression: Postgres rejects `WHERE (? IS NULL OR …)` with null $1 → 500 "could not determine data type".
+    check('chat: history without before= returns 200 (no PG null-param 500)', r.status === 200, JSON.stringify(r.data).slice(0, 200));
     const aliasA = r.data.alias;
     check('chat: member gets session alias', r.status === 200 && !!aliasA && aliasA !== '管理员', aliasA);
+    r = await api(mA, 'GET', '/api/chat/messages?limit=10');
+    check('chat: history with limit only still 200', r.status === 200);
+    // after we have messages, pagination with before= should also work
+
     r = await api(mA, 'POST', '/api/chat/messages', { text: '匿名你好 🎴' });
     check('chat: text + emoji accepted', r.status === 200 && r.data.message?.text === '匿名你好 🎴' && r.data.message?.alias === aliasA && r.data.message?.userId === undefined);
     r = await api(mA, 'POST', '/api/chat/messages', { text: '加我微信wxid_test99' });
@@ -273,6 +279,14 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     check('chat: unmute', r.status === 200);
     r = await api(mA, 'POST', '/api/chat/messages', { text: 'unmuted ok' });
     check('chat: unmuted can send again', r.status === 200);
+    r = await api(mA, 'GET', '/api/chat/messages?limit=5');
+    const newest = (r.data.messages || []).slice(-1)[0];
+    if (newest?.id) {
+      const page = await api(mA, 'GET', `/api/chat/messages?before=${newest.id}&limit=5`);
+      check('chat: history with before= id returns 200', page.status === 200);
+    } else {
+      check('chat: history with before= id returns 200', false, 'no messages to page');
+    }
     r = await api(admin, 'GET', '/api/chat/messages');
     check('chat: admin history includes identity mapping', (r.data.messages || []).some((x) => x.username === ua && x.alias));
     const aliasBefore = aliasA;
