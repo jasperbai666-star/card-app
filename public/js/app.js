@@ -78,11 +78,11 @@
         }
       }
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       state.wsConnected = false;
       updateLiveDot();
-      // reconnect after login still valid
-      if (state.user) {
+      // reconnect after login still valid (not when the server forced logout)
+      if (state.user && ev.code !== 4001 && state.ws === ws) {
         setTimeout(async () => {
           try {
             const { token } = await api('/api/ws-token', { method: 'POST', body: {} });
@@ -109,7 +109,8 @@
       state.user = user;
       const { token } = await api('/api/ws-token', { method: 'POST', body: {} });
       connectWs(token);
-      routeHome();
+      if (location.pathname === '/settings') renderSettings();
+      else routeHome();
     } catch {
       renderAuth(location.pathname === '/register' ? 'register' : 'login');
     }
@@ -124,7 +125,9 @@
   async function logout() {
     try { await api('/api/logout', { method: 'POST', body: {} }); } catch (_) {}
     state.user = null;
-    if (state.ws) try { state.ws.close(); } catch (_) {}
+    const ws = state.ws;
+    state.ws = null;
+    if (ws) try { ws.close(); } catch (_) {}
     renderAuth('login');
   }
 
@@ -140,14 +143,20 @@
           <form id="authForm">
             ${mode === 'register' ? `
               <label>邀请码</label>
-              <input name="inviteCode" class="mono" placeholder="8位邀请码" required autocomplete="off" />
+              <input name="inviteCode" class="mono" placeholder="8位邀请码" required maxlength="16" autocomplete="off" />
               <label>显示名称（可选）</label>
               <input name="displayName" placeholder="昵称" maxlength="24" />
             ` : ''}
             <label>账号</label>
-            <input name="username" placeholder="用户名" required autocomplete="username" />
+            <input name="username" placeholder="用户名" required maxlength="24" autocomplete="username" />
             <label>密码</label>
-            <input name="password" type="password" placeholder="密码" required autocomplete="${mode === 'register' ? 'new-password' : 'current-password'}" />
+            <input name="password" type="password" placeholder="${mode === 'register' ? '至少 8 位' : '密码'}" required maxlength="72" autocomplete="${mode === 'register' ? 'new-password' : 'current-password'}" />
+            ${mode === 'login' ? `
+              <div id="totpWrap" class="hidden">
+                <label>两步验证码</label>
+                <input name="totp" class="mono" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="身份验证器里的 6 位数字" autocomplete="one-time-code" />
+              </div>
+            ` : ''}
             <button class="btn btn-primary" type="submit">${mode === 'register' ? '注册并登录' : '登录'}</button>
           </form>
           <div class="link-row">
@@ -166,6 +175,7 @@
       e.preventDefault();
       const fd = new FormData(e.target);
       const body = Object.fromEntries(fd.entries());
+      if (!body.totp) delete body.totp;
       const err = document.getElementById('err');
       err.classList.remove('show');
       try {
@@ -176,10 +186,174 @@
         toast(mode === 'register' ? '注册成功' : '登录成功');
         routeHome();
       } catch (ex) {
+        if (ex.data?.code === 'TOTP_REQUIRED') {
+          const w = document.getElementById('totpWrap');
+          w.classList.remove('hidden');
+          w.querySelector('input').focus();
+        }
         err.textContent = ex.message;
         err.classList.add('show');
       }
     };
+  }
+
+  // ---------- Account security settings (all users) ----------
+  async function renderSettings() {
+    history.replaceState(null, '', '/settings');
+    const u = state.user;
+    app.innerHTML = `
+      <div class="shell">
+        <div class="topbar">
+          <div>
+            <h1 class="glow-title" style="font-size:1.2rem">安全设置</h1>
+            <div class="who">${escapeHtml(u.displayName || u.username)} · @${escapeHtml(u.username)}</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="backBtn">返回</button>
+        </div>
+        <div class="grid-2">
+          <div class="panel" id="pwPanel">
+            <h2>修改密码</h2>
+            <form id="pwForm">
+              <label>当前密码</label>
+              <input name="currentPassword" type="password" required maxlength="72" autocomplete="current-password" />
+              <label>新密码（至少 8 位）</label>
+              <input name="newPassword" type="password" required minlength="8" maxlength="72" autocomplete="new-password" />
+              <label>确认新密码</label>
+              <input name="confirm" type="password" required minlength="8" maxlength="72" autocomplete="new-password" />
+              <button class="btn btn-primary" type="submit">保存新密码</button>
+              <p class="hint">修改后，其他设备上的登录会全部失效。</p>
+            </form>
+          </div>
+          <div class="panel" id="tfaPanel">
+            <h2>两步验证（2FA）</h2>
+            <div id="tfaBody"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>我的登录设备</h2>
+          <button class="btn btn-ghost btn-sm" id="logoutOthers" style="margin-bottom:10px">退出其他所有设备</button>
+          <div id="mySessions"><div class="empty">加载中…</div></div>
+        </div>
+      </div>
+    `;
+    document.getElementById('backBtn').onclick = routeHome;
+    document.getElementById('pwForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      if (fd.get('newPassword') !== fd.get('confirm')) return toast('两次输入的新密码不一致');
+      try {
+        const r = await api('/api/me/password', {
+          method: 'POST',
+          body: { currentPassword: fd.get('currentPassword'), newPassword: fd.get('newPassword') },
+        });
+        e.target.reset();
+        toast(`密码已修改${r.otherSessionsClosed ? `，已退出其他 ${r.otherSessionsClosed} 台设备` : ''}`);
+        loadMySessions();
+      } catch (ex) { toast(ex.message); }
+    };
+    renderTfa();
+    loadMySessions();
+  }
+
+  function renderTfa() {
+    const box = document.getElementById('tfaBody');
+    if (!box) return;
+    if (state.user.totpEnabled) {
+      box.innerHTML = `
+        <p><span class="badge badge-unused">已开启</span> 登录时需要输入身份验证器中的 6 位验证码。</p>
+        <form id="tfaOff">
+          <label>当前密码</label>
+          <input name="password" type="password" required maxlength="72" autocomplete="current-password" />
+          <label>当前验证码</label>
+          <input name="code" class="mono" inputmode="numeric" maxlength="6" required />
+          <button class="btn btn-danger" type="submit">关闭两步验证</button>
+        </form>`;
+      document.getElementById('tfaOff').onsubmit = async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        try {
+          await api('/api/me/2fa/disable', { method: 'POST', body: { password: fd.get('password'), code: fd.get('code') } });
+          state.user.totpEnabled = false;
+          toast('两步验证已关闭');
+          renderTfa();
+        } catch (ex) { toast(ex.message); }
+      };
+      return;
+    }
+    box.innerHTML = `
+      <p class="hint">开启后，登录除了密码还需要手机身份验证器（Google Authenticator、Microsoft Authenticator、腾讯身份验证器等）里的 6 位动态码。</p>
+      <button class="btn btn-primary" id="tfaStart">开始设置</button>`;
+    document.getElementById('tfaStart').onclick = async () => {
+      try {
+        const { qr, secret } = await api('/api/me/2fa/setup', { method: 'POST', body: {} });
+        box.innerHTML = `
+          <p>1. 用身份验证器 App 扫描二维码：</p>
+          <div class="qr-wrap"><img alt="2FA 二维码" id="tfaQr" /></div>
+          <p class="hint">无法扫码？手动输入密钥：<span class="mono" id="tfaSecret"></span></p>
+          <form id="tfaOn">
+            <label>2. 输入 App 显示的 6 位验证码确认</label>
+            <input name="code" class="mono" inputmode="numeric" maxlength="6" required autocomplete="one-time-code" />
+            <button class="btn btn-primary" type="submit">确认开启</button>
+          </form>`;
+        document.getElementById('tfaQr').src = qr;
+        document.getElementById('tfaSecret').textContent = secret;
+        document.getElementById('tfaOn').onsubmit = async (e) => {
+          e.preventDefault();
+          try {
+            await api('/api/me/2fa/enable', { method: 'POST', body: { code: new FormData(e.target).get('code') } });
+            state.user.totpEnabled = true;
+            toast('两步验证已开启');
+            renderTfa();
+          } catch (ex) { toast(ex.message); }
+        };
+      } catch (ex) { toast(ex.message); }
+    };
+  }
+
+  async function loadMySessions() {
+    const box = document.getElementById('mySessions');
+    if (!box) return;
+    try {
+      const { sessions } = await api('/api/me/sessions');
+      box.innerHTML = sessionsTable(sessions, false);
+      const lo = document.getElementById('logoutOthers');
+      if (lo) lo.onclick = async () => {
+        if (!confirm('确定让其他设备全部退出登录？')) return;
+        try {
+          const r = await api('/api/me/sessions/logout-others', { method: 'POST', body: {} });
+          toast(`已退出 ${r.closed} 个其他设备`);
+          loadMySessions();
+        } catch (ex) { toast(ex.message); }
+      };
+    } catch (ex) {
+      box.innerHTML = `<div class="empty">${escapeHtml(ex.message)}</div>`;
+    }
+  }
+
+  function shortUA(ua) {
+    const s = String(ua || '');
+    const os = /iPhone|iPad/.test(s) ? 'iOS' : /Android/.test(s) ? 'Android' : /Windows/.test(s) ? 'Windows' : /Mac OS X/.test(s) ? 'macOS' : /Linux/.test(s) ? 'Linux' : '';
+    const br = /MicroMessenger/.test(s) ? '微信' : /Edg\//.test(s) ? 'Edge' : /Chrome\//.test(s) ? 'Chrome' : /Firefox\//.test(s) ? 'Firefox' : /Safari\//.test(s) ? 'Safari' : '';
+    return [os, br].filter(Boolean).join(' · ') || s.slice(0, 40) || '未知设备';
+  }
+
+  function sessionsTable(sessions, withUser) {
+    if (!sessions.length) return '<div class="empty">暂无在线会话</div>';
+    return `
+      <div style="overflow-x:auto"><table>
+        <thead><tr>${withUser ? '<th>账号</th>' : ''}<th>设备</th><th>IP</th><th>登录时间</th><th>最近活动</th>${withUser ? '<th>操作</th>' : ''}</tr></thead>
+        <tbody>
+          ${sessions.map((x) => `
+            <tr>
+              ${withUser ? `<td><strong>${escapeHtml(x.displayName || x.username)}</strong><div class="muted-sm">@${escapeHtml(x.username)}${x.role === 'admin' ? ' · 管理员' : ''}</div></td>` : ''}
+              <td title="${escapeHtml(x.userAgent)}">${escapeHtml(shortUA(x.userAgent))}${x.current ? ' <span class="badge badge-unused">当前</span>' : ''}</td>
+              <td class="mono">${escapeHtml(x.ip)}</td>
+              <td class="muted-sm">${formatTime(x.createdAt)}</td>
+              <td class="muted-sm">${formatTime(x.lastSeen)}</td>
+              ${withUser ? `<td>${x.role === 'member' ? `<button class="btn btn-danger btn-sm kick" data-uid="${Number(x.userId)}">强制下线</button>` : '—'}</td>` : ''}
+            </tr>`).join('')}
+        </tbody>
+      </table></div>`;
   }
 
   // ---------- Member ----------
@@ -192,7 +366,10 @@
             <h1 class="glow-title" style="font-size:1.2rem">我的卡牌</h1>
             <div class="who"><span class="live-dot ${state.wsConnected ? '' : 'off'}"></span>${escapeHtml(state.user.displayName || state.user.username)}</div>
           </div>
-          <button class="btn btn-ghost btn-sm" id="logoutBtn">退出登录</button>
+          <div class="row-actions">
+            <button class="btn btn-ghost btn-sm" id="settingsBtn">安全设置</button>
+            <button class="btn btn-ghost btn-sm" id="logoutBtn">退出登录</button>
+          </div>
         </div>
         <div class="panel member-hero">
           <div id="myCard"></div>
@@ -220,6 +397,7 @@
       </div>
     `;
     document.getElementById('logoutBtn').onclick = logout;
+    document.getElementById('settingsBtn').onclick = renderSettings;
     document.getElementById('sugForm').onsubmit = async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
@@ -288,18 +466,24 @@
             <h1 class="glow-title" style="font-size:1.2rem">管理控制台</h1>
             <div class="who"><span class="live-dot ${state.wsConnected ? '' : 'off'}"></span>管理员 · ${escapeHtml(state.user.username)}</div>
           </div>
-          <button class="btn btn-ghost btn-sm" id="logoutBtn">退出登录</button>
+          <div class="row-actions">
+            <button class="btn btn-ghost btn-sm" id="settingsBtn">安全设置</button>
+            <button class="btn btn-ghost btn-sm" id="logoutBtn">退出登录</button>
+          </div>
         </div>
         <div class="tabs" id="tabs">
           <button class="tab active" data-tab="members">成员与卡牌</button>
           <button class="tab" data-tab="ranking">等级排行</button>
           <button class="tab" data-tab="suggestions">建议 / 要求</button>
           <button class="tab" data-tab="invites">邀请码</button>
+          <button class="tab" data-tab="security">安全中心</button>
         </div>
         <div id="tabBody"></div>
       </div>
     `;
     document.getElementById('logoutBtn').onclick = logout;
+    document.getElementById('settingsBtn').onclick = renderSettings;
+    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === state.tab));
     document.getElementById('tabs').onclick = (e) => {
       const btn = e.target.closest('.tab');
       if (!btn) return;
@@ -317,6 +501,7 @@
       ranking: renderRankingTab,
       suggestions: renderSuggestionsTab,
       invites: renderInvitesTab,
+      security: renderSecurityTab,
     };
     (map[state.tab] || map.members)();
   }
@@ -362,8 +547,11 @@
                         <button class="btn btn-ghost btn-sm clear-card">清空</button>
                       </div>
                     </td>
-                    <td>${m.disabled ? '<span class="badge badge-revoked">已停用</span>' : '<span class="badge badge-unused">正常</span>'}</td>
+                    <td>${m.disabled ? '<span class="badge badge-revoked">已停用</span>' : '<span class="badge badge-unused">正常</span>'}
+                      ${m.totpEnabled ? '<span class="badge badge-handled">2FA</span>' : ''}</td>
                     <td class="row-actions">
+                      <button class="btn btn-ghost btn-sm kick-mem">强制下线</button>
+                      ${m.totpEnabled ? '<button class="btn btn-ghost btn-sm reset-2fa">重置2FA</button>' : ''}
                       <button class="btn btn-ghost btn-sm toggle-dis">${m.disabled ? '启用' : '停用'}</button>
                       <button class="btn btn-danger btn-sm del-mem">删除</button>
                     </td>
@@ -417,6 +605,21 @@
               method: 'POST',
               body: { disabled: !m.disabled },
             });
+            refreshAdminTab();
+          } catch (ex) { toast(ex.message); }
+        };
+        tr.querySelector('.kick-mem').onclick = async () => {
+          try {
+            const r = await api(`/api/admin/members/${id}/logout`, { method: 'POST', body: {} });
+            toast(`已强制下线（关闭 ${r.closed} 个会话）`);
+          } catch (ex) { toast(ex.message); }
+        };
+        const r2 = tr.querySelector('.reset-2fa');
+        if (r2) r2.onclick = async () => {
+          if (!confirm(`确认重置 ${m.username} 的两步验证？该成员下次登录只需密码。`)) return;
+          try {
+            await api(`/api/admin/members/${id}/reset-2fa`, { method: 'POST', body: {} });
+            toast('已重置两步验证');
             refreshAdminTab();
           } catch (ex) { toast(ex.message); }
         };
@@ -520,30 +723,52 @@
         <div class="panel">
           <h2>邀请码</h2>
           <div class="form-inline" style="margin-bottom:14px">
+            <div class="field">
+              <label>有效期</label>
+              <select id="invDays">
+                <option value="1">1 天</option>
+                <option value="3">3 天</option>
+                <option value="7" selected>7 天</option>
+                <option value="30">30 天</option>
+                <option value="0">永久有效</option>
+              </select>
+            </div>
+            <div class="field" style="flex:2">
+              <label>备注（发给谁，可选）</label>
+              <input id="invNote" maxlength="50" placeholder="例如：小王" />
+            </div>
             <button class="btn btn-primary btn-sm" id="gen1">生成 1 个</button>
             <button class="btn btn-ghost btn-sm" id="gen5">生成 5 个</button>
           </div>
-          <table>
-            <thead><tr><th>邀请码</th><th>状态</th><th>使用者</th><th>创建时间</th><th>操作</th></tr></thead>
+          <div style="overflow-x:auto"><table>
+            <thead><tr><th>邀请码</th><th>备注</th><th>状态</th><th>使用者</th><th>有效期至</th><th>操作</th></tr></thead>
             <tbody>
               ${invites.map((i) => `
                 <tr>
                   <td class="mono">${escapeHtml(i.code)}</td>
-                  <td><span class="badge badge-${i.status}">${statusLabel(i.status)}</span></td>
+                  <td>${i.note ? escapeHtml(i.note) : '—'}</td>
+                  <td><span class="badge badge-${escapeHtml(i.status)}">${statusLabel(i.status)}</span></td>
                   <td>${i.usedByUsername ? escapeHtml(i.usedByUsername) : '—'}</td>
-                  <td style="font-size:.82rem;color:var(--muted)">${formatTime(i.createdAt)}</td>
+                  <td class="muted-sm">${i.expiresAt ? formatTime(i.expiresAt) : '永久'}</td>
                   <td>
                     ${i.status === 'unused' ? `<button class="btn btn-danger btn-sm revoke" data-id="${i.id}">撤销</button>` : '—'}
                   </td>
                 </tr>
-              `).join('') || '<tr><td colspan="5" class="empty">暂无邀请码</td></tr>'}
+              `).join('') || '<tr><td colspan="6" class="empty">暂无邀请码</td></tr>'}
             </tbody>
-          </table>
+          </table></div>
         </div>
       `;
       const gen = async (n) => {
         try {
-          const { codes } = await api('/api/admin/invites', { method: 'POST', body: { count: n } });
+          const { codes } = await api('/api/admin/invites', {
+            method: 'POST',
+            body: {
+              count: n,
+              expiresInDays: Number(document.getElementById('invDays').value),
+              note: document.getElementById('invNote').value.trim() || undefined,
+            },
+          });
           toast(`已生成：${codes.join(', ')}`);
           refreshAdminTab();
         } catch (ex) { toast(ex.message); }
@@ -564,8 +789,67 @@
     }
   }
 
+  const AUDIT_REASON = {
+    ok: '登录成功', ok_2fa: '登录成功（2FA）', register: '注册', bad_password: '密码错误', no_user: '账号不存在',
+    bad_totp: '验证码错误', locked: '已锁定', disabled: '账号停用', pw_changed: '修改密码',
+    pw_change_bad_current: '改密失败', '2fa_enabled': '开启2FA', '2fa_disabled': '关闭2FA',
+    '2fa_reset_by_admin': '管理员重置2FA', forced_logout_by_admin: '被强制下线', unlocked_by_admin: '管理员解锁', logout_others: '退出其他设备',
+  };
+
+  async function renderSecurityTab() {
+    const body = document.getElementById('tabBody');
+    body.innerHTML = `<div class="panel"><div class="empty">加载中…</div></div>`;
+    try {
+      const [{ sessions }, { audit }] = await Promise.all([api('/api/admin/sessions'), api('/api/admin/audit?limit=200')]);
+      body.innerHTML = `
+        <div class="panel">
+          <h2>在线会话（${sessions.length}）</h2>
+          ${sessionsTable(sessions, true)}
+        </div>
+        <div class="panel">
+          <h2>登录日志（最近 200 条 · 北京时间）</h2>
+          <form class="form-inline" id="unlockForm" style="margin-bottom:12px">
+            <div class="field"><input name="username" maxlength="24" placeholder="被锁定的用户名" required /></div>
+            <button class="btn btn-ghost btn-sm" type="submit">解除登录锁定</button>
+          </form>
+          <div style="overflow-x:auto"><table>
+            <thead><tr><th>时间</th><th>账号</th><th>结果</th><th>IP</th><th>设备</th></tr></thead>
+            <tbody>
+              ${audit.map((a) => `
+                <tr>
+                  <td class="muted-sm">${formatTime(a.createdAt)}</td>
+                  <td>${escapeHtml(a.username)}</td>
+                  <td><span class="badge ${a.success ? 'badge-unused' : 'badge-revoked'}">${escapeHtml(AUDIT_REASON[a.reason] || a.reason || (a.success ? '成功' : '失败'))}</span></td>
+                  <td class="mono">${escapeHtml(a.ip)}</td>
+                  <td title="${escapeHtml(a.userAgent)}">${escapeHtml(shortUA(a.userAgent))}</td>
+                </tr>`).join('') || '<tr><td colspan="5" class="empty">暂无记录</td></tr>'}
+            </tbody>
+          </table></div>
+        </div>`;
+      document.getElementById('unlockForm').onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+          await api('/api/admin/unlock', { method: 'POST', body: { username: new FormData(e.target).get('username') } });
+          toast('已解除锁定');
+          e.target.reset();
+        } catch (ex) { toast(ex.message); }
+      };
+      body.querySelectorAll('.kick').forEach((btn) => {
+        btn.onclick = async () => {
+          try {
+            const r = await api(`/api/admin/members/${btn.dataset.uid}/logout`, { method: 'POST', body: {} });
+            toast(`已强制下线（关闭 ${r.closed} 个会话）`);
+            refreshAdminTab();
+          } catch (ex) { toast(ex.message); }
+        };
+      });
+    } catch (ex) {
+      body.innerHTML = `<div class="panel"><div class="empty">${escapeHtml(ex.message)}</div></div>`;
+    }
+  }
+
   function statusLabel(s) {
-    return { unused: '未使用', used: '已使用', revoked: '已撤销' }[s] || s;
+    return { unused: '未使用', used: '已使用', revoked: '已撤销', expired: '已过期' }[s] || escapeHtml(s);
   }
 
   function escapeHtml(s) {
@@ -573,7 +857,8 @@
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function formatTime(t) {

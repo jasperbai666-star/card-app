@@ -54,6 +54,33 @@ CREATE TABLE IF NOT EXISTS ws_tokens (
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_invite_unused ON invite_codes(revoked, used_by);
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
+
+CREATE TABLE IF NOT EXISTS login_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  username TEXT,
+  user_id INTEGER,
+  ip TEXT,
+  user_agent TEXT,
+  success INTEGER NOT NULL DEFAULT 0,
+  reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON login_audit(created_at);
+CREATE TABLE IF NOT EXISTS login_throttle (
+  key TEXT PRIMARY KEY,
+  fails INTEGER NOT NULL DEFAULT 0,
+  first_fail_at TEXT,
+  locked_until TEXT
+);
+CREATE TABLE IF NOT EXISTS user_sessions (
+  sid TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  ip TEXT,
+  user_agent TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 `;
 
 const PG_NOW = `to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS')`;
@@ -98,6 +125,33 @@ CREATE TABLE IF NOT EXISTS ws_tokens (
 CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 CREATE INDEX IF NOT EXISTS idx_invite_unused ON invite_codes(revoked, used_by);
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
+
+CREATE TABLE IF NOT EXISTS login_audit (
+  id SERIAL PRIMARY KEY,
+  created_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  username TEXT,
+  user_id INTEGER,
+  ip TEXT,
+  user_agent TEXT,
+  success INTEGER NOT NULL DEFAULT 0,
+  reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON login_audit(created_at);
+CREATE TABLE IF NOT EXISTS login_throttle (
+  key TEXT PRIMARY KEY,
+  fails INTEGER NOT NULL DEFAULT 0,
+  first_fail_at TEXT,
+  locked_until TEXT
+);
+CREATE TABLE IF NOT EXISTS user_sessions (
+  sid TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  ip TEXT,
+  user_agent TEXT,
+  created_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  last_seen TEXT NOT NULL DEFAULT (${PG_NOW})
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 CREATE TABLE IF NOT EXISTS "session" (
   "sid" varchar NOT NULL COLLATE "default" PRIMARY KEY,
   "sess" json NOT NULL,
@@ -108,6 +162,17 @@ CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON "session" ("expire");
 
 /** Current-time expression usable inside SQL strings. */
 const NOW = isPg ? PG_NOW : `datetime('now')`;
+
+/** Columns added after the first release (migrated on boot). */
+const NEW_COLUMNS = [
+  ['users', 'totp_secret', 'TEXT'],
+  ['users', 'totp_pending_secret', 'TEXT'],
+  ['users', 'totp_enabled', 'INTEGER NOT NULL DEFAULT 0'],
+  ['users', 'totp_last_step', 'INTEGER'],
+  ['users', 'password_changed_at', 'TEXT'],
+  ['invite_codes', 'expires_at', 'TEXT'],
+  ['invite_codes', 'note', 'TEXT'],
+];
 
 function toPg(sql) {
   let i = 0;
@@ -130,7 +195,7 @@ if (isPg) {
     async all(sql, ...p) { return (await q(toPg(sql), p)).rows; },
     async run(sql, ...p) {
       let s = toPg(sql);
-      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+ws_tokens/i.test(s);
+      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+(ws_tokens|user_sessions|login_throttle)/i.test(s);
       if (isInsert) s += ' RETURNING id';
       const r = await q(s, p);
       return { changes: r.rowCount, lastInsertRowid: isInsert && r.rows[0] ? Number(r.rows[0].id) : undefined };
@@ -139,7 +204,12 @@ if (isPg) {
 
   backend = {
     ...make((s, p) => pool.query(s, p)),
-    async init() { await pool.query(SCHEMA_PG); },
+    async init() {
+      await pool.query(SCHEMA_PG);
+      for (const [t, c, type] of NEW_COLUMNS) {
+        await pool.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS ${c} ${type}`);
+      }
+    },
     async transaction(fn) {
       const client = await pool.connect();
       try {
@@ -174,7 +244,13 @@ if (isPg) {
   let chain = Promise.resolve();
   backend = {
     ...ops,
-    async init() { sdb.exec(SCHEMA_SQLITE); },
+    async init() {
+      sdb.exec(SCHEMA_SQLITE);
+      for (const [t, c, type] of NEW_COLUMNS) {
+        const cols = sdb.prepare(`PRAGMA table_info(${t})`).all().map((r) => r.name);
+        if (!cols.includes(c)) sdb.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${type}`);
+      }
+    },
     // serialize transactions so concurrent async callers don't interleave
     transaction(fn) {
       const run = async () => {

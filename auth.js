@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const db = require('./db');
+const { touchSession } = require('./security');
 
 const SALT_ROUNDS = 12;
 
@@ -8,8 +9,19 @@ function hashPassword(password) {
   return bcrypt.hashSync(password, SALT_ROUNDS);
 }
 
+// Used to spend the same bcrypt time when the username does not exist (avoids user enumeration by timing)
+const DUMMY_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), SALT_ROUNDS);
+
 function verifyPassword(password, hash) {
-  return bcrypt.compareSync(password, hash);
+  return bcrypt.compareSync(String(password), hash || DUMMY_HASH);
+}
+
+/** Returns an error message, or null if the password is acceptable. */
+function checkPasswordPolicy(pw) {
+  const s = String(pw || '');
+  if (s.length < 8) return '密码至少 8 位';
+  if (Buffer.byteLength(s, 'utf8') > 72) return '密码过长（最多 72 字节）';
+  return null;
 }
 
 function generateInviteCode() {
@@ -42,7 +54,8 @@ async function requireAuth(req, res, next) {
     if (!req.session || !req.session.userId) {
       return res.status(401).json({ error: '请先登录' });
     }
-    const user = await findUserById(req.session.userId);
+    const tracked = await touchSession(req.sessionID);
+    const user = tracked ? await findUserById(req.session.userId) : null;
     if (!user || user.disabled) {
       req.session.destroy(() => {});
       return res.status(401).json({ error: '账号不可用，请重新登录' });
@@ -75,6 +88,8 @@ function requireMember(req, res, next) {
 module.exports = {
   hashPassword,
   verifyPassword,
+  checkPasswordPolicy,
+  SALT_ROUNDS,
   generateInviteCode,
   generatePassword,
   findUserByUsername,

@@ -1,3 +1,5 @@
+@font-face { font-family: Orbitron; font-style: normal; font-weight: 500; font-display: swap; src: url(/fonts/orbitron-latin-500-normal.woff2) format('woff2'); }
+@font-face { font-family: Orbitron; font-style: normal; font-weight: 700; font-display: swap; src: url(/fonts/orbitron-latin-700-normal.woff2) format('woff2'); }
 :root {
   --bg: #05060a;
   --bg2: #0b0e17;
@@ -22,7 +24,7 @@ html, body {
   margin: 0; padding: 0; min-height: 100%;
   background: radial-gradient(1200px 600px at 50% -10%, #1a1430 0%, var(--bg) 55%, #000 100%);
   color: var(--text);
-  font-family: "Noto Sans SC", system-ui, sans-serif;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", system-ui, sans-serif;
 }
 body { overflow-x: hidden; }
 
@@ -45,7 +47,7 @@ body { overflow-x: hidden; }
 #app { position: relative; z-index: 1; min-height: 100vh; }
 
 .glow-title {
-  font-family: Orbitron, "Noto Sans SC", sans-serif;
+  font-family: Orbitron, "PingFang SC", "Microsoft YaHei", sans-serif;
   letter-spacing: .08em;
   background: linear-gradient(90deg, var(--gold), var(--neon), var(--gold2));
   -webkit-background-clip: text;
@@ -303,3 +305,10 @@ th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: u
   0%,100% { opacity: 1; }
   50% { opacity: .4; }
 }
+
+.hidden { display: none !important; }
+.muted-sm { font-size: .8rem; color: var(--muted); }
+.qr-wrap { display: flex; justify-content: center; margin: 10px 0; }
+.qr-wrap img { width: 200px; height: 200px; background: #fff; padding: 8px; border-radius: 10px; }
+.badge-expired { background: rgba(255,255,255,.08); color: var(--muted); }
+#tfaSecret { word-break: break-all; }

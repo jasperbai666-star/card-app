@@ -102,7 +102,11 @@ server {
 |------|------|
 | `DATABASE_URL` | Postgres 的 Internal Database URL |
 | `SESSION_SECRET` | 随机长字符串 |
-| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 管理员账号；每次启动都会按此同步密码 |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 管理员账号；**只在第一次创建管理员时使用**，之后在网页「安全设置」里改的密码不会被覆盖 |
+| `ADMIN_PASSWORD_FORCE_RESET` | 设为 `true` 时，下次启动把管理员密码重置为 `ADMIN_PASSWORD`、清除管理员 2FA，并踢下线所有管理员会话（忘记密码时用，用完请删除此变量） |
+| `TRUST_PROXY_HOPS` | 前面有几层反向代理（默认 1，Render 用默认即可），用于取得真实访客 IP |
+| `ALLOWED_ORIGINS` | 可选，额外允许的来源（逗号分隔，如自定义域名 `https://cards.example.com`） |
+| `LOGIN_MAX_FAILS_PER_USER` / `LOGIN_MAX_FAILS_PER_IP` / `LOGIN_LOCK_MINUTES` | 可选，默认每账号 5 次、每 IP 10 次失败锁定 15 分钟 |
 | `NODE_VERSION` | `22` |
 
 也可以直接使用仓库里的 `render.yaml`（Blueprint）。
@@ -113,21 +117,44 @@ server {
 
 ```bash
 BASE_URL=https://你的服务.onrender.com ADMIN_USERNAME=admin ADMIN_PASSWORD=... npm run test:smoke
+# 浏览器检查（XSS 不执行、无 CSP 报错）+ 安全页面截图到 screens/
+BASE_URL=... ADMIN_USERNAME=admin ADMIN_PASSWORD=... node scripts/security-screens.js
 ```
 
 ## 数据与备份
 
 - 数据库文件：`data/app.db`
-- 管理员凭证：`ADMIN_CREDENTIALS.txt`（勿提交到公开仓库）
+- 管理员凭证：本地未设置环境变量时生成 `ADMIN_CREDENTIALS.txt`（勿提交到公开仓库）
 - 备份：停止服务后复制整个 `data/` 目录即可
 
 ## 安全说明
 
-- 密码使用 bcrypt 哈希存储
-- Session Cookie 为 httpOnly
-- 成员接口不会返回其他成员的卡牌；管理接口需管理员 Session
-- 请妥善保管邀请码与管理员密码
+**登录防护**
+- 同一账号连续 5 次登录失败锁定 15 分钟；同一 IP 累计 10 次失败也会锁定 15 分钟（管理员可在「安全中心」解除某个账号的锁定）
+- 错误提示统一为「账号或密码错误」，不暴露账号是否存在；不存在的账号也会走一遍 bcrypt，防止靠响应时间猜账号
+- 注册接口每 IP 15 分钟最多 10 次；建议提交每人 10 分钟最多 10 条；改密码/2FA 操作也有限流
 
+**两步验证（2FA，可选）**
+1. 登录后点右上角「安全设置」→「两步验证」→「开始设置」
+2. 用手机身份验证器（Google Authenticator / Microsoft Authenticator / 腾讯身份验证器等）扫码
+3. 输入 App 里显示的 6 位数字确认，即开启；以后登录要输入密码 + 6 位验证码
+4. 手机丢了：成员可让管理员在「成员与卡牌」里点「重置2FA」；管理员自己丢了：在 Render 环境变量里设 `ADMIN_PASSWORD_FORCE_RESET=true`（会同时重置密码和清除 2FA），重新部署登录后删掉该变量
+
+**会话管理**
+- 登录时更换 Session ID（防会话固定）；Cookie 为 HttpOnly + SameSite=Strict，线上自动 Secure
+- 7 天无活动自动过期（有活动自动续期）
+- 「安全中心」可看所有在线会话，一键「强制下线」；停用或删除成员会立刻踢掉其所有会话和实时连接
+- 修改密码后，其他设备自动退出；「安全设置」里也可「退出其他所有设备」
+
+**审计日志**：「安全中心」显示最近 200 条登录记录（北京时间、账号、IP、设备、成功/失败原因），保留 90 天
+
+**邀请码**：可设置有效期（1 天 / 3 天 / 7 天(默认) / 30 天 / 永久）和备注，过期自动失效
+
+**其他**
+- 密码 bcrypt（cost 12）哈希存储，最少 8 位
+- helmet 安全响应头：严格 CSP（只允许本站脚本）、禁止被嵌入 iframe、HSTS、nosniff 等；字体本地托管，不依赖 Google
+- CSRF 防护：所有写操作必须来自本站（校验 Origin/Referer）且为 JSON 请求；WebSocket 也校验来源
+- 所有用户输入在页面上都会转义显示（防 XSS），并限制长度
 ## 开发脚本
 
 ```bash

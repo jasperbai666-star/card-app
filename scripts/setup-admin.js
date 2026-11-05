@@ -2,7 +2,9 @@
 /**
  * Ensure an admin account exists.
  *  - If ADMIN_USERNAME + ADMIN_PASSWORD (or legacy ADMIN_USER / ADMIN_PASS) are set,
- *    that admin is created, or its password is synced to the env value on every boot.
+ *    the admin is created with that password only when it does not exist yet (seed).
+ *    Afterwards the password changed in the app is kept. Set ADMIN_PASSWORD_FORCE_RESET=true
+ *    to force the env password once (e.g. forgotten password); remove it afterwards.
  *    No credentials file is written in this mode (recommended for cloud deploys).
  *  - Otherwise, on first boot a random password is generated and written to
  *    ADMIN_CREDENTIALS.txt (local use).
@@ -22,9 +24,14 @@ async function ensureAdmin() {
     const u = await findUserByUsername(envUser);
     if (u) {
       if (u.role !== 'admin') throw new Error(`用户名 ${envUser} 已被成员占用`);
-      if (!verifyPassword(envPass, u.password_hash)) {
-        await db.run('UPDATE users SET password_hash = ?, disabled = 0 WHERE id = ?', hashPassword(envPass), u.id);
-        console.log(`管理员 ${envUser} 密码已按环境变量同步`);
+      if (process.env.ADMIN_PASSWORD_FORCE_RESET === 'true' && (u.totp_enabled || !verifyPassword(envPass, u.password_hash))) {
+        // recovery path: reset password AND clear 2FA (lost phone), kill all admin sessions
+        await db.run(
+          'UPDATE users SET password_hash = ?, disabled = 0, totp_secret = NULL, totp_pending_secret = NULL, totp_enabled = 0, totp_last_step = NULL WHERE id = ?',
+          hashPassword(envPass), u.id
+        );
+        await db.run('DELETE FROM user_sessions WHERE user_id = ?', u.id);
+        console.log(`管理员 ${envUser} 密码已按 ADMIN_PASSWORD_FORCE_RESET 重置并清除两步验证（请随后删除该变量）`);
       }
       return { created: false, username: envUser };
     }

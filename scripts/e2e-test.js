@@ -10,6 +10,7 @@ const SCREEN_DIR = path.join(__dirname, '..', 'screens');
 fs.mkdirSync(SCREEN_DIR, { recursive: true });
 
 function readAdminCreds() {
+  if (process.env.ADMIN_USERNAME && process.env.ADMIN_PASSWORD) return { user: process.env.ADMIN_USERNAME, pass: process.env.ADMIN_PASSWORD };
   const text = fs.readFileSync(path.join(__dirname, '..', 'ADMIN_CREDENTIALS.txt'), 'utf8');
   const user = text.match(/用户名:\s*(.+)/)?.[1]?.trim();
   const pass = text.match(/密码:\s*(.+)/)?.[1]?.trim();
@@ -18,7 +19,7 @@ function readAdminCreds() {
 }
 
 async function api(cookieJar, method, urlPath, body) {
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json', Origin: new URL(BASE).origin };
   if (cookieJar.cookie) headers.Cookie = cookieJar.cookie;
   const res = await fetch(`${BASE}${urlPath}`, {
     method,
