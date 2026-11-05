@@ -246,6 +246,64 @@ CREATE TABLE IF NOT EXISTS chat_mutes (
 );
 `;
 
+
+const ANNOUNCE_SCHEMA_SQLITE = `
+CREATE TABLE IF NOT EXISTS announcements (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT,
+  deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ann_pin_id ON announcements(pinned, id);
+CREATE TABLE IF NOT EXISTS announcement_reads (
+  user_id INTEGER NOT NULL,
+  announcement_id INTEGER NOT NULL,
+  read_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, announcement_id)
+);
+CREATE TABLE IF NOT EXISTS user_achievements (
+  user_id INTEGER NOT NULL,
+  badge_key TEXT NOT NULL,
+  unlocked_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, badge_key)
+);
+CREATE INDEX IF NOT EXISTS idx_ach_user ON user_achievements(user_id);
+`;
+
+
+const ANNOUNCE_SCHEMA_PG = `
+CREATE TABLE IF NOT EXISTS announcements (
+  id SERIAL PRIMARY KEY,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  updated_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  expires_at TEXT,
+  deleted_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ann_pin_id ON announcements(pinned, id);
+CREATE TABLE IF NOT EXISTS announcement_reads (
+  user_id INTEGER NOT NULL,
+  announcement_id INTEGER NOT NULL,
+  read_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  PRIMARY KEY (user_id, announcement_id)
+);
+CREATE TABLE IF NOT EXISTS user_achievements (
+  user_id INTEGER NOT NULL,
+  badge_key TEXT NOT NULL,
+  unlocked_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  PRIMARY KEY (user_id, badge_key)
+);
+CREATE INDEX IF NOT EXISTS idx_ach_user ON user_achievements(user_id);
+`;
+
 const POST_MIGRATIONS = [
   // Race-safe guard: at most one active (unused, unrevoked) member-issued code per creator.
   `CREATE UNIQUE INDEX IF NOT EXISTS uniq_member_active_invite ON invite_codes(created_by)
@@ -279,7 +337,7 @@ if (isPg) {
     async all(sql, ...p) { return (await q(toPg(sql), p)).rows; },
     async run(sql, ...p) {
       let s = toPg(sql);
-      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+(ws_tokens|user_sessions|login_throttle|chat_images|chat_mutes)/i.test(s);
+      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+(ws_tokens|user_sessions|login_throttle|chat_images|chat_mutes|announcement_reads|user_achievements)/i.test(s);
       if (isInsert) s += ' RETURNING id';
       const r = await q(s, p);
       return { changes: r.rowCount, lastInsertRowid: isInsert && r.rows[0] ? Number(r.rows[0].id) : undefined };
@@ -291,6 +349,7 @@ if (isPg) {
     async init() {
       await pool.query(SCHEMA_PG);
       await pool.query(CHAT_SCHEMA_PG);
+      await pool.query(ANNOUNCE_SCHEMA_PG);
       for (const [t, c, type] of NEW_COLUMNS) {
         await pool.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS ${c} ${type}`);
       }
@@ -333,6 +392,7 @@ if (isPg) {
     async init() {
       sdb.exec(SCHEMA_SQLITE);
       sdb.exec(CHAT_SCHEMA_SQLITE);
+      sdb.exec(ANNOUNCE_SCHEMA_SQLITE);
       for (const [t, c, type] of NEW_COLUMNS) {
         const cols = sdb.prepare(`PRAGMA table_info(${t})`).all().map((r) => r.name);
         if (!cols.includes(c)) sdb.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${type}`);

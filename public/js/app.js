@@ -78,12 +78,26 @@
         else if (msg.type === 'chat_message' && state.user?.role === 'member') {
           // badge on chat entry if panel not mounted yet
         }
+      } else if (msg.type === 'achievement_unlocked') {
+        if (state.user?.role === 'member' && msg.badge) {
+          toast('🏅 解锁成就：' + msg.badge.name);
+          loadMyAchievements();
+        }
+      } else if (msg.type === 'announcement' || msg.type === 'announcement_updated' || msg.type === 'announcement_deleted') {
+        if (state.user?.role === 'member') {
+          loadAnnouncements();
+          if (msg.type === 'announcement' && msg.announcement) toast('📢 新公告：' + msg.announcement.title);
+        }
+        if (state.user?.role === 'admin' && state.tab === 'announcements') {
+          if (state.editingName) state.pendingRefresh = true; else refreshAdminTab();
+        }
       } else if (msg.type === 'force_logout') {
         toast(msg.reason || '已被强制下线');
         logout();
       } else if (msg.type === 'new_suggestion' || msg.type === 'member_joined' ||
                  msg.type === 'member_card_updated' || msg.type === 'member_removed' || msg.type === 'member_updated' ||
-                 msg.type === 'suggestion_updated' || msg.type === 'invites_changed' || msg.type === 'chat_message' || msg.type === 'chat_deleted' || msg.type === 'chat_cleared') {
+                 msg.type === 'suggestion_updated' || msg.type === 'invites_changed' || msg.type === 'chat_message' || msg.type === 'chat_deleted' || msg.type === 'chat_cleared' ||
+                 msg.type === 'announcement' || msg.type === 'announcement_updated' || msg.type === 'announcement_deleted') {
         if (state.user?.role === 'admin') {
           // don't wipe an inline name edit in progress; refresh once it closes
           if (state.editingName) state.pendingRefresh = true; else refreshAdminTab();
@@ -406,6 +420,25 @@
           <p class="mp-note"><span class="mp-lock">🔒</span> 仅你可见 · 管理员调整后实时同步</p>
         </section>
 
+        <section class="mp-glass mp-wide mp-announce" id="announcePanel">
+          <div class="mp-head">
+            <h2>公告栏</h2>
+            <span class="mp-chip gold" id="announceUnread">0 条未读</span>
+          </div>
+          <div id="announceList"><div class="mp-skel"></div></div>
+          <div class="mp-row" style="justify-content:flex-end;margin-top:8px">
+            <button type="button" class="mp-btn ghost sm" id="announceReadAll">全部标为已读</button>
+          </div>
+        </section>
+
+        <section class="mp-glass mp-wide mp-achievements" id="achievementsPanel">
+          <div class="mp-head">
+            <h2>成就勋章</h2>
+            <span class="mp-chip gold" id="achCount">0 / 0</span>
+          </div>
+          <div class="ach-grid" id="achGrid"><div class="mp-skel"></div></div>
+        </section>
+
         <div class="mp-grid">
           ${window.ChatUI ? ChatUI.memberShell() : ''}
           <section class="mp-glass mp-inviter">
@@ -476,6 +509,16 @@
     loadMyCard();
     loadMySuggestions();
     loadMyInvite();
+    loadAnnouncements();
+    loadMyAchievements();
+    const readAllBtn = document.getElementById('announceReadAll');
+    if (readAllBtn) readAllBtn.onclick = async () => {
+      try {
+        await api('/api/announcements/read-all', { method: 'POST', body: {} });
+        toast('已全部标为已读');
+        loadAnnouncements();
+      } catch (ex) { toast(ex.message); }
+    };
     if (window.ChatUI) {
       state.chatCtrl = ChatUI.bind(document.getElementById('chatPanel') || app, api, toast, { admin: false });
       state.chatCtrl.markOpen();
@@ -620,6 +663,80 @@
     }
   }
 
+
+  async function loadAnnouncements() {
+    const box = document.getElementById('announceList');
+    const badge = document.getElementById('announceUnread');
+    if (!box) return;
+    try {
+      const r = await api('/api/announcements');
+      const list = r.announcements || [];
+      const unread = Number(r.unread || 0);
+      if (badge) badge.textContent = unread ? (unread + ' 条未读') : '全部已读';
+      if (!list.length) {
+        box.innerHTML = `<div class="mp-empty"><div class="mp-empty-ico">📢</div><div>暂无公告</div><p class="mp-fine">管理员发布后会实时出现在这里</p></div>`;
+        return;
+      }
+      box.innerHTML = `<ul class="ann-list">${list.map((a) => `
+        <li class="ann-item ${a.pinned ? 'pinned' : ''} ${a.read ? 'read' : 'unread'}" data-id="${a.id}">
+          <div class="ann-top">
+            <div class="ann-title">${a.pinned ? '<span class="ann-pin" title="置顶">📌</span>' : ''}${escapeHtml(a.title)}${a.read ? '' : '<span class="ann-dot" aria-label="未读"></span>'}</div>
+            <time class="mp-time">${formatTime(a.createdAt)}</time>
+          </div>
+          <div class="ann-body">${escapeHtml(a.body)}</div>
+          ${a.expiresAt ? `<div class="ann-exp">有效至 ${escapeHtml(a.expiresAt)}</div>` : ''}
+        </li>`).join('')}</ul>`;
+      box.querySelectorAll('.ann-item.unread').forEach((el) => {
+        el.addEventListener('click', async () => {
+          const id = el.dataset.id;
+          try {
+            await api('/api/announcements/' + id + '/read', { method: 'POST', body: {} });
+            el.classList.remove('unread'); el.classList.add('read');
+            const dot = el.querySelector('.ann-dot'); if (dot) dot.remove();
+            // refresh unread chip
+            const still = box.querySelectorAll('.ann-item.unread').length;
+            if (badge) badge.textContent = still ? (still + ' 条未读') : '全部已读';
+          } catch (_) {}
+        }, { once: true });
+      });
+    } catch (ex) {
+      box.innerHTML = `<div class="empty">${escapeHtml(ex.message)}</div>`;
+    }
+  }
+
+  async function loadMyAchievements() {
+    const grid = document.getElementById('achGrid');
+    const count = document.getElementById('achCount');
+    if (!grid) return;
+    try {
+      const r = await api('/api/my/achievements');
+      const badges = r.badges || [];
+      if (count) count.textContent = `${r.unlocked || 0} / ${r.total || badges.length}`;
+      grid.innerHTML = badges.map((b) => `
+        <div class="ach-card ${b.unlocked ? 'on' : 'off'}" title="${escapeHtml(b.description)}">
+          <div class="ach-medal" aria-hidden="true">
+            <svg viewBox="0 0 64 64" width="48" height="48">
+              <defs>
+                <linearGradient id="g${b.key}" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="${b.unlocked ? '#fff1bf' : '#3a3f4d'}"/>
+                  <stop offset="55%" stop-color="${b.unlocked ? '#c9a13b' : '#232833'}"/>
+                  <stop offset="100%" stop-color="${b.unlocked ? '#8a6a1f' : '#151821'}"/>
+                </linearGradient>
+              </defs>
+              <circle cx="32" cy="28" r="18" fill="url(#g${b.key})" stroke="${b.unlocked ? '#ffe9a0' : '#555'}" stroke-width="2"/>
+              <path d="M22 44 L18 58 L32 50 L46 58 L42 44" fill="${b.unlocked ? '#c9a13b' : '#2a2f3d'}" opacity=".9"/>
+              <text x="32" y="33" text-anchor="middle" font-size="14">${b.icon || '🏅'}</text>
+            </svg>
+          </div>
+          <div class="ach-name">${escapeHtml(b.name)}</div>
+          <div class="ach-desc">${escapeHtml(b.description)}</div>
+          <div class="ach-state">${b.unlocked ? '已解锁 · ' + escapeHtml(formatTime(b.unlockedAt)) : '未解锁'}</div>
+        </div>`).join('');
+    } catch (ex) {
+      grid.innerHTML = `<div class="empty">${escapeHtml(ex.message)}</div>`;
+    }
+  }
+
   // ---------- Admin ----------
   function renderAdmin() {
     history.replaceState(null, '', '/admin');
@@ -640,6 +757,7 @@
           <button class="tab" data-tab="ranking">等级排行</button>
           <button class="tab" data-tab="suggestions">建议 / 要求</button>
           <button class="tab" data-tab="invites">邀请码</button>
+          <button class="tab" data-tab="announcements">公告栏</button>
           <button class="tab" data-tab="chat">匿名聊天</button>
           <button class="tab" data-tab="security">安全中心</button>
         </div>
@@ -668,6 +786,7 @@
       ranking: renderRankingTab,
       suggestions: renderSuggestionsTab,
       invites: renderInvitesTab,
+      announcements: renderAnnouncementsTab,
       chat: renderChatTab,
       security: renderSecurityTab,
     };
@@ -693,7 +812,7 @@
           <div style="overflow-x:auto">
             <table>
               <thead>
-                <tr><th>成员</th><th>邀请人</th><th>当前牌</th><th>设置卡牌</th><th>状态</th><th>操作</th></tr>
+                <tr><th>成员</th><th>邀请人</th><th>成就</th><th>当前牌</th><th>设置卡牌</th><th>状态</th><th>操作</th></tr>
               </thead>
               <tbody>
                 ${members.map((m) => `
@@ -711,6 +830,7 @@
                       <div style="font-size:.78rem;color:var(--muted)">@${escapeHtml(m.username)}</div>
                     </td>
                     <td class="inviter-cell">${m.invitedBy ? (m.invitedBy.role === 'admin' ? '<span class="badge badge-handled">管理员</span>' : escapeHtml(m.invitedBy.name)) : '未知'}</td>
+                    <td class="ach-cell"><span class="badge badge-pending" title="${escapeHtml((m.achievements?.keys || []).join(', '))}">🏅 ${(m.achievements && m.achievements.unlocked) || 0}/${(m.achievements && m.achievements.total) || 7}</span></td>
                     <td>${CardsUI.mini(m.card)}</td>
                     <td>
                       <div class="form-inline">
@@ -998,8 +1118,98 @@
     ok: '登录成功', ok_2fa: '登录成功（2FA）', register: '注册', bad_password: '密码错误', no_user: '账号不存在',
     bad_totp: '验证码错误', locked: '已锁定', disabled: '账号停用', pw_changed: '修改密码',
     pw_change_bad_current: '改密失败', '2fa_enabled': '开启2FA', '2fa_disabled': '关闭2FA',
-    '2fa_reset_by_admin': '管理员重置2FA', forced_logout_by_admin: '被强制下线', unlocked_by_admin: '管理员解锁', display_name_changed: '修改姓名', member_invite_created: '成员生成邀请码', member_invite_revoked: '成员撤销邀请码', logout_others: '退出其他设备',
+    '2fa_reset_by_admin': '管理员重置2FA', forced_logout_by_admin: '被强制下线', unlocked_by_admin: '管理员解锁', display_name_changed: '修改姓名', member_invite_created: '成员生成邀请码', member_invite_revoked: '成员撤销邀请码', announcement_created: '发布公告', announcement_updated: '编辑公告', announcement_deleted: '删除公告', announcement_pinned: '置顶公告', announcement_unpinned: '取消置顶', logout_others: '退出其他设备',
   };
+
+
+  async function renderAnnouncementsTab() {
+    const body = document.getElementById('tabBody');
+    if (!body) return;
+    body.innerHTML = `<div class="panel"><div class="empty">加载中…</div></div>`;
+    try {
+      const { announcements } = await api('/api/admin/announcements');
+      body.innerHTML = `
+        <div class="panel">
+          <h2>发布公告</h2>
+          <form id="annForm" class="stack" style="gap:10px;max-width:640px">
+            <div class="field"><label>标题</label><input name="title" maxlength="80" required placeholder="例如：本周活动说明" /></div>
+            <div class="field"><label>正文</label><textarea name="body" rows="4" maxlength="4000" required placeholder="公告内容（纯文本，会安全转义）"></textarea></div>
+            <div class="form-inline" style="gap:12px;flex-wrap:wrap">
+              <label class="check"><input type="checkbox" name="pinned" /> 置顶</label>
+              <div class="field" style="flex:1;min-width:180px"><label>过期时间（可选）</label><input name="expiresAt" type="datetime-local" /></div>
+            </div>
+            <button class="btn btn-primary" type="submit">发布公告</button>
+          </form>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h2>公告列表（${(announcements || []).length}）</h2>
+          <div id="adminAnnList">
+            ${(announcements || []).length ? `<ul class="ann-admin-list">${announcements.map((a) => `
+              <li data-id="${a.id}">
+                <div class="ann-top">
+                  <strong>${a.pinned ? '📌 ' : ''}${escapeHtml(a.title)}</strong>
+                  <span class="muted-sm">${escapeHtml(a.createdAt || '')}${a.expiresAt ? ' · 过期 ' + escapeHtml(a.expiresAt) : ''}</span>
+                </div>
+                <div class="ann-body">${escapeHtml(a.body)}</div>
+                <div class="row-actions" style="margin-top:8px;gap:6px;flex-wrap:wrap">
+                  <button class="btn btn-ghost btn-sm pin" data-pinned="${a.pinned ? 1 : 0}">${a.pinned ? '取消置顶' : '置顶'}</button>
+                  <button class="btn btn-ghost btn-sm edit">编辑</button>
+                  <button class="btn btn-danger btn-sm del">删除</button>
+                </div>
+              </li>`).join('')}</ul>` : '<div class="empty">暂无公告</div>'}
+          </div>
+        </div>`;
+      document.getElementById('annForm').onsubmit = async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const expiresRaw = fd.get('expiresAt');
+        try {
+          await api('/api/admin/announcements', {
+            method: 'POST',
+            body: {
+              title: fd.get('title'),
+              body: fd.get('body'),
+              pinned: !!fd.get('pinned'),
+              expiresAt: expiresRaw ? String(expiresRaw).replace('T', ' ') + ':00' : null,
+            },
+          });
+          toast('✓ 公告已发布');
+          renderAnnouncementsTab();
+        } catch (ex) { toast(ex.message); }
+      };
+      body.querySelectorAll('.ann-admin-list li').forEach((li) => {
+        const id = li.dataset.id;
+        li.querySelector('.pin').onclick = async () => {
+          const pinned = li.querySelector('.pin').dataset.pinned === '1' ? false : true;
+          try {
+            await api(`/api/admin/announcements/${id}/pin`, { method: 'POST', body: { pinned } });
+            renderAnnouncementsTab();
+          } catch (ex) { toast(ex.message); }
+        };
+        li.querySelector('.del').onclick = async () => {
+          if (!confirm('确认删除该公告？')) return;
+          try {
+            await api(`/api/admin/announcements/${id}`, { method: 'DELETE' });
+            toast('已删除');
+            renderAnnouncementsTab();
+          } catch (ex) { toast(ex.message); }
+        };
+        li.querySelector('.edit').onclick = async () => {
+          const title = prompt('新标题', li.querySelector('strong').textContent.replace(/^📌\s*/, ''));
+          if (title == null) return;
+          const bodyText = prompt('新正文', li.querySelector('.ann-body').textContent);
+          if (bodyText == null) return;
+          try {
+            await api(`/api/admin/announcements/${id}`, { method: 'PUT', body: { title, body: bodyText } });
+            toast('已更新');
+            renderAnnouncementsTab();
+          } catch (ex) { toast(ex.message); }
+        };
+      });
+    } catch (ex) {
+      body.innerHTML = `<div class="panel"><div class="empty">${escapeHtml(ex.message)}</div></div>`;
+    }
+  }
 
   async function renderChatTab() {
     const body = document.getElementById('tabBody');

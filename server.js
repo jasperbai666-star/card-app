@@ -26,6 +26,7 @@ const {
 const { RANKS, SUITS, validateCard, publicCard, levelOf } = require('./cards');
 const { ensureAdmin } = require('./scripts/setup-admin.js');
 const chat = require('./chat');
+const achievements = require('./achievements');
 
 const app = express();
 const server = http.createServer(app);
@@ -125,11 +126,13 @@ app.use(
 app.use('/api', sec.csrfGuard);
 
 app.get('/healthz', ah(async (_req, res) => {
-  // Touch chat schema so a missing migration fails health checks (and boot) loudly.
+  // Touch chat / announce schemas so a missing migration fails health checks (and boot) loudly.
   try {
     await db.all('SELECT id FROM chat_messages ORDER BY id DESC LIMIT 1');
+    await db.all('SELECT id FROM announcements ORDER BY id DESC LIMIT 1');
+    await db.all('SELECT badge_key FROM user_achievements LIMIT 1');
   } catch (e) {
-    return res.status(500).json({ ok: false, error: 'chat schema', detail: String(e.message || e).slice(0, 120) });
+    return res.status(500).json({ ok: false, error: 'schema', detail: String(e.message || e).slice(0, 120) });
   }
   res.json({ ok: true });
 }));
@@ -194,6 +197,45 @@ function sendToUser(userId, payload) {
     if (ws.readyState === 1) ws.send(data);
   }
 }
+
+async function broadcastMembers(payload) {
+  try {
+    const members = await db.all("SELECT id FROM users WHERE role = 'member' AND disabled = 0");
+    for (const m of members) sendToUser(m.id, payload);
+  } catch (e) {
+    console.error('broadcastMembers', e.message);
+  }
+}
+
+/** Award badges and push real-time unlock notices. */
+async function notifyAchievements(userId, keys) {
+  try {
+    const newly = await achievements.award(db, userId, keys);
+    for (const badge of newly) {
+      sendToUser(userId, { type: 'achievement_unlocked', badge });
+    }
+    return newly;
+  } catch (e) {
+    console.error('notifyAchievements', e.message);
+    return [];
+  }
+}
+
+function formatAnnouncement(row, { read = false } = {}) {
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    pinned: !!row.pinned,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    expiresAt: row.expires_at || null,
+    createdBy: row.created_by,
+    read: !!read,
+  };
+}
+
+const ANN_ACTIVE = `deleted_at IS NULL AND (expires_at IS NULL OR expires_at > ${NOW})`;
 
 async function broadcastAdmins(payload) {
   try {
@@ -318,6 +360,7 @@ async function handleWsChatSend(ws, msg) {
   );
   const row = await loadChatRow(info.lastInsertRowid);
   await broadcastChat('chat_message', row);
+  await notifyAchievements(user.id, ['first_chat']);
 }
 
 setInterval(() => {
@@ -412,6 +455,11 @@ const adminWriteLimiter = rateLimit({
   keyGenerator: (req) => 'a' + (req.session?.userId || 'anon'),
   handler: limitJson('操作太频繁，请稍后再试'),
 });
+const announcementLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: 40, standardHeaders: 'draft-7', legacyHeaders: false,
+  keyGenerator: (req) => 'ann' + (req.session?.userId || 'anon'),
+  handler: limitJson('公告操作太频繁，请稍后再试'),
+});
 const sensitiveLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false,
   keyGenerator: (req) => 'u' + (req.session?.userId || 'anon'),
@@ -485,6 +533,7 @@ app.post('/api/login', ah(async (req, res) => {
   await sec.clearFailures(uname, req.ip);
   await establishSession(req, user);
   await sec.audit(req, { username: uname, userId: user.id, success: true, reason: user.totp_enabled ? 'ok_2fa' : 'ok' });
+  if (user.role === 'member') await notifyAchievements(user.id, ['first_login']);
   res.json({ user: sanitizeUser(user), wsToken: await issueWsToken(user.id, req.session.chatAlias || null), chatAlias: req.session.chatAlias });
 }));
 
@@ -555,6 +604,18 @@ app.post('/api/register', registerLimiter, ah(async (req, res) => {
   await sec.audit(req, { username: uname, userId: user.id, success: true, reason: 'register' });
   broadcastAdmins({ type: 'member_joined', user: sanitizeUser(user) });
   if (invite.created_by) sendToUser(invite.created_by, { type: 'invite_used', displayName: user.display_name || user.username });
+  await notifyAchievements(user.id, ['first_login']);
+  if (invite.created_by) {
+    const inviter = await findUserById(invite.created_by);
+    if (inviter && inviter.role === 'member') {
+      const cnt = await db.get(`SELECT COUNT(*) AS c FROM users WHERE invited_by = ? AND role = 'member'`, invite.created_by);
+      const n = Number(cnt?.c || 0);
+      const keys = [];
+      if (n >= 1) keys.push('invite_1');
+      if (n >= 3) keys.push('invite_3');
+      if (keys.length) await notifyAchievements(invite.created_by, keys);
+    }
+  }
   res.json({ user: sanitizeUser(user), wsToken: await issueWsToken(user.id, req.session.chatAlias || null), chatAlias: req.session.chatAlias });
 }));
 
@@ -587,6 +648,7 @@ app.post('/api/my/suggestions', requireAuth, suggestionLimiter, ah(async (req, r
   );
   const row = await db.get(`${SUGG_SELECT} WHERE s.id = ?`, info.lastInsertRowid);
   broadcastAdmins({ type: 'new_suggestion', suggestion: formatSuggestion(row) });
+  await notifyAchievements(req.user.id, ['suggestion']);
   res.json({ suggestion: formatSuggestion(row) });
 }));
 
@@ -816,6 +878,7 @@ app.post('/api/chat/messages', requireAuth, chatLimiter, ah(async (req, res) => 
   );
   const row = await loadChatRow(info.lastInsertRowid);
   await broadcastChat('chat_message', row);
+  await notifyAchievements(req.user.id, ['first_chat']);
   res.json({ message: req.user.role === 'admin' ? chat.adminMessage(row) : chat.publicMessage(row) });
 }));
 
@@ -843,6 +906,7 @@ app.post('/api/chat/images', requireAuth, chatUploadLimiter, ah(async (req, res)
   });
   const row = await loadChatRow(req._chatImageMsgId);
   await broadcastChat('chat_message', row);
+  await notifyAchievements(req.user.id, ['image_master', 'first_chat']);
   await sec.audit(req, { username: req.user.username, userId: req.user.id, success: true, reason: 'chat_image_upload', detail: key.slice(0, 12) });
   res.json({ message: req.user.role === 'admin' ? chat.adminMessage(row) : chat.publicMessage(row) });
 }));
@@ -958,7 +1022,13 @@ app.delete('/api/admin/chat/mutes/:userId', requireAdmin, adminWriteLimiter, ah(
 // ---------- Admin APIs ----------
 app.get('/api/admin/members', requireAdmin, ah(async (_req, res) => {
   const rows = await db.all(`SELECT u.*, ${INVITER_COLS} FROM users u ${INVITER_JOIN} WHERE u.role = 'member' ORDER BY u.id ASC`);
-  const members = rows.map((u) => ({ ...sanitizeUser(u), invitedBy: inviterOf(u), level: levelOf(u.card_rank) }));
+  const achMap = await achievements.summaryForUsers(db, rows.map((u) => u.id));
+  const members = rows.map((u) => ({
+    ...sanitizeUser(u),
+    invitedBy: inviterOf(u),
+    level: levelOf(u.card_rank),
+    achievements: achMap[u.id] || { unlocked: 0, total: achievements.BADGES.length, keys: [] },
+  }));
   members.sort((a, b) => (b.level || 0) - (a.level || 0) || a.id - b.id);
   res.json({ members });
 }));
@@ -1000,6 +1070,9 @@ app.put('/api/admin/members/:id/card', requireAdmin, ah(async (req, res) => {
   const card = publicCard(updated.card_rank, updated.card_suit);
   sendToUser(id, { type: 'card_updated', card });
   broadcastAdmins({ type: 'member_card_updated', memberId: id, card, member: sanitizeUser(updated) });
+  if (levelOf(updated.card_rank) >= achievements.HIGH_CARD_LEVEL) {
+    await notifyAchievements(id, ['high_card']);
+  }
   res.json({ member: sanitizeUser(updated) });
 }));
 
@@ -1051,6 +1124,8 @@ app.delete('/api/admin/members/:id', requireAdmin, ah(async (req, res) => {
     await tx.run(`DELETE FROM suggestions WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM ws_tokens WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM chat_mutes WHERE user_id = ?`, id);
+    await tx.run(`DELETE FROM user_achievements WHERE user_id = ?`, id);
+    await tx.run(`DELETE FROM announcement_reads WHERE user_id = ?`, id);
     // Codes the member used: detach and mark revoked so they can never be re-used.
     await tx.run(`UPDATE invite_codes SET used_by = NULL, used_at = NULL, revoked = 1 WHERE used_by = ?`, id);
     // Codes the member issued: revoke unused ones and detach creator. Members they invited keep
@@ -1214,6 +1289,193 @@ app.post('/api/admin/suggestions/:id/handle', requireAdmin, ah(async (req, res) 
   res.json({ suggestion: formatSuggestion(updated) });
 }));
 
+
+// ---------- Announcements (member + admin) ----------
+app.get('/api/announcements', requireAuth, ah(async (req, res) => {
+  const rows = await db.all(
+    `SELECT a.*,
+       CASE WHEN r.user_id IS NULL THEN 0 ELSE 1 END AS is_read
+     FROM announcements a
+     LEFT JOIN announcement_reads r ON r.announcement_id = a.id AND r.user_id = ?
+     WHERE a.deleted_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > ${NOW})
+     ORDER BY a.pinned DESC, a.id DESC
+     LIMIT 100`,
+    req.user.id
+  );
+  const list = rows.map((r) => formatAnnouncement(r, { read: !!r.is_read }));
+  const unread = list.filter((a) => !a.read).length;
+  res.json({ announcements: list, unread });
+}));
+
+app.post('/api/announcements/:id/read', requireAuth, ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await db.get(
+    `SELECT * FROM announcements WHERE id = ? AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > ${NOW})`,
+    id
+  );
+  if (!row) return res.status(404).json({ error: '公告不存在或已过期' });
+  const existing = await db.get(
+    'SELECT user_id FROM announcement_reads WHERE user_id = ? AND announcement_id = ?',
+    req.user.id, id
+  );
+  if (!existing) {
+    await db.run(
+      `INSERT INTO announcement_reads (user_id, announcement_id, read_at) VALUES (?, ?, ${NOW})`,
+      req.user.id, id
+    );
+  }
+  res.json({ ok: true });
+}));
+
+app.post('/api/announcements/read-all', requireAuth, ah(async (req, res) => {
+  const rows = await db.all(
+    `SELECT id FROM announcements WHERE deleted_at IS NULL AND (expires_at IS NULL OR expires_at > ${NOW})`
+  );
+  for (const r of rows) {
+    const existing = await db.get(
+      'SELECT user_id FROM announcement_reads WHERE user_id = ? AND announcement_id = ?',
+      req.user.id, r.id
+    );
+    if (!existing) {
+      await db.run(
+        `INSERT INTO announcement_reads (user_id, announcement_id, read_at) VALUES (?, ?, ${NOW})`,
+        req.user.id, r.id
+      );
+    }
+  }
+  res.json({ ok: true, marked: rows.length });
+}));
+
+app.get('/api/admin/announcements', requireAdmin, ah(async (_req, res) => {
+  const rows = await db.all(
+    `SELECT * FROM announcements WHERE deleted_at IS NULL ORDER BY pinned DESC, id DESC LIMIT 200`
+  );
+  res.json({ announcements: rows.map((r) => formatAnnouncement(r)) });
+}));
+
+function parseAnnouncementBody(body) {
+  const title = String(body?.title || '').trim();
+  const text = String(body?.body || '').trim();
+  if (!title || title.length > 80) return { ok: false, error: '标题需 1–80 字' };
+  if (!text || text.length > 4000) return { ok: false, error: '正文需 1–4000 字' };
+  const pinned = body?.pinned === true || body?.pinned === 1 || body?.pinned === '1' ? 1 : 0;
+  let expiresAt = null;
+  if (body?.expiresAt != null && String(body.expiresAt).trim() !== '') {
+    const raw = String(body.expiresAt).trim().replace('T', ' ').slice(0, 19);
+    if (!/^\d{4}-\d{2}-\d{2}/.test(raw)) return { ok: false, error: '过期时间格式无效' };
+    expiresAt = raw.length === 10 ? raw + ' 23:59:59' : raw;
+  }
+  return { ok: true, title, body: text, pinned, expiresAt };
+}
+
+app.post('/api/admin/announcements', requireAdmin, announcementLimiter, ah(async (req, res) => {
+  const v = parseAnnouncementBody(req.body || {});
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const info = await db.run(
+    db.isPg
+      ? `INSERT INTO announcements (title, body, pinned, created_by, created_at, updated_at, expires_at)
+         VALUES (?, ?, ?, ?, ${NOW}, ${NOW}, ?::text)`
+      : `INSERT INTO announcements (title, body, pinned, created_by, created_at, updated_at, expires_at)
+         VALUES (?, ?, ?, ?, ${NOW}, ${NOW}, ?)`,
+    v.title, v.body, v.pinned, req.user.id, v.expiresAt
+  );
+  const row = await db.get('SELECT * FROM announcements WHERE id = ?', info.lastInsertRowid);
+  const pub = formatAnnouncement(row);
+  broadcastMembers({ type: 'announcement', announcement: pub });
+  broadcastAdmins({ type: 'announcement', announcement: pub });
+  await sec.audit(req, {
+    username: req.user.username, userId: req.user.id, success: true,
+    reason: 'announcement_created', detail: String(row.id),
+  });
+  res.json({ announcement: pub });
+}));
+
+app.put('/api/admin/announcements/:id', requireAdmin, announcementLimiter, ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const existing = await db.get('SELECT * FROM announcements WHERE id = ? AND deleted_at IS NULL', id);
+  if (!existing) return res.status(404).json({ error: '公告不存在' });
+  const v = parseAnnouncementBody({
+    title: req.body?.title != null ? req.body.title : existing.title,
+    body: req.body?.body != null ? req.body.body : existing.body,
+    pinned: req.body?.pinned != null ? req.body.pinned : existing.pinned,
+    expiresAt: req.body?.expiresAt !== undefined ? req.body.expiresAt : existing.expires_at,
+  });
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  if (db.isPg) {
+    await db.run(
+      `UPDATE announcements SET title = ?, body = ?, pinned = ?, expires_at = ?::text, updated_at = ${NOW} WHERE id = ?`,
+      v.title, v.body, v.pinned, v.expiresAt, id
+    );
+  } else {
+    await db.run(
+      `UPDATE announcements SET title = ?, body = ?, pinned = ?, expires_at = ?, updated_at = ${NOW} WHERE id = ?`,
+      v.title, v.body, v.pinned, v.expiresAt, id
+    );
+  }
+  const row = await db.get('SELECT * FROM announcements WHERE id = ?', id);
+  const pub = formatAnnouncement(row);
+  broadcastMembers({ type: 'announcement_updated', announcement: pub });
+  broadcastAdmins({ type: 'announcement_updated', announcement: pub });
+  await sec.audit(req, {
+    username: req.user.username, userId: req.user.id, success: true,
+    reason: 'announcement_updated', detail: String(id),
+  });
+  res.json({ announcement: pub });
+}));
+
+app.post('/api/admin/announcements/:id/pin', requireAdmin, announcementLimiter, ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const existing = await db.get('SELECT * FROM announcements WHERE id = ? AND deleted_at IS NULL', id);
+  if (!existing) return res.status(404).json({ error: '公告不存在' });
+  const pinned = req.body?.pinned === false || req.body?.pinned === 0 || req.body?.pinned === '0' ? 0 : 1;
+  await db.run(`UPDATE announcements SET pinned = ?, updated_at = ${NOW} WHERE id = ?`, pinned, id);
+  const row = await db.get('SELECT * FROM announcements WHERE id = ?', id);
+  const pub = formatAnnouncement(row);
+  broadcastMembers({ type: 'announcement_updated', announcement: pub });
+  broadcastAdmins({ type: 'announcement_updated', announcement: pub });
+  await sec.audit(req, {
+    username: req.user.username, userId: req.user.id, success: true,
+    reason: pinned ? 'announcement_pinned' : 'announcement_unpinned', detail: String(id),
+  });
+  res.json({ announcement: pub });
+}));
+
+app.delete('/api/admin/announcements/:id', requireAdmin, announcementLimiter, ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const existing = await db.get('SELECT * FROM announcements WHERE id = ? AND deleted_at IS NULL', id);
+  if (!existing) return res.status(404).json({ error: '公告不存在' });
+  await db.run(`UPDATE announcements SET deleted_at = ${NOW}, updated_at = ${NOW} WHERE id = ?`, id);
+  broadcastMembers({ type: 'announcement_deleted', id });
+  broadcastAdmins({ type: 'announcement_deleted', id });
+  await sec.audit(req, {
+    username: req.user.username, userId: req.user.id, success: true,
+    reason: 'announcement_deleted', detail: String(id),
+  });
+  res.json({ ok: true });
+}));
+
+// ---------- Achievements ----------
+app.get('/api/my/achievements', requireAuth, ah(async (req, res) => {
+  if (req.user.role === 'admin') {
+    return res.json({ badges: achievements.BADGES.map((b) => achievements.publicBadge(b, null)), unlocked: 0 });
+  }
+  const badges = await achievements.listForUser(db, req.user.id);
+  res.json({ badges, unlocked: badges.filter((b) => b.unlocked).length, total: badges.length });
+}));
+
+app.get('/api/admin/members/:id/achievements', requireAdmin, ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const member = await findUserById(id);
+  if (!member || member.role !== 'member') return res.status(404).json({ error: '成员不存在' });
+  const badges = await achievements.listForUser(db, id);
+  res.json({
+    memberId: id,
+    badges,
+    unlocked: badges.filter((b) => b.unlocked).length,
+    total: badges.length,
+  });
+}));
+
 // SPA fallback for clean URLs
 app.get(['/', '/login', '/register', '/admin', '/member', '/settings'], (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -1228,6 +1490,12 @@ app.use((err, _req, res, _next) => {
 async function start() {
   await db.init();
   await ensureAdmin();
+  try {
+    const bf = await achievements.backfillAll(db);
+    if (bf.awarded) console.log(`成就回填: 为 ${bf.members} 名成员补发 ${bf.awarded} 枚勋章`);
+  } catch (e) {
+    console.error('成就回填失败:', e.message);
+  }
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`卡牌系统已启动: http://0.0.0.0:${PORT} (数据库: ${db.isPg ? 'PostgreSQL' : 'SQLite'})`);
     const credPath = path.join(__dirname, 'ADMIN_CREDENTIALS.txt');

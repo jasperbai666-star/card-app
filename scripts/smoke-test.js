@@ -49,7 +49,7 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
 (async () => {
   const admin = {};
   const sfx = Math.random().toString(36).slice(2, 6);
-  const created = { members: [], codes: [] };
+  const created = { members: [], codes: [], announcements: [] };
   const PW = 'Test-pass-' + sfx + '9';
 
   // --- headers ---
@@ -302,6 +302,55 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     r = await api(mB, 'GET', '/api/chat/messages');
     check('chat: after clear members see no live messages', (r.data.messages || []).length === 0);
     chatWsA.ws.close(); chatWsB.ws.close();
+  }
+
+  // --- announcements + achievements ---
+  {
+    const XSS_ANN = '<script>alert(1)</script>公告 ' + sfx;
+    const memWsAnn = await openWs((await api(mA, 'POST', '/api/ws-token', {})).data.token);
+    r = await api(admin, 'POST', '/api/admin/announcements', {
+      title: XSS_ANN, body: '正文 ' + XSS_ANN, pinned: true,
+    });
+    check('admin creates pinned announcement', r.status === 200 && r.data.announcement?.title === XSS_ANN && r.data.announcement?.pinned);
+    const annId = r.data.announcement?.id;
+    created.announcements = created.announcements || [];
+    if (annId) created.announcements.push(annId);
+    const pushed = await waitFor(memWsAnn.msgs, (m) => m.type === 'announcement' && m.announcement?.id === annId, 5000);
+    check('member WS live announcement push', !!pushed && pushed.announcement?.title === XSS_ANN);
+    r = await api(mA, 'GET', '/api/announcements');
+    check('member sees announcement unread', r.status === 200 && (r.data.announcements || []).some((a) => a.id === annId && a.read === false) && r.data.unread >= 1);
+    check('member cannot create announcement', (await api(mA, 'POST', '/api/admin/announcements', { title: 'x', body: 'y' })).status === 403);
+    r = await api(mA, 'POST', `/api/announcements/${annId}/read`, {});
+    check('member marks announcement read', r.status === 200);
+    r = await api(mA, 'GET', '/api/announcements');
+    check('announcement now read; unread decreases', (r.data.announcements || []).some((a) => a.id === annId && a.read === true));
+    r = await api(admin, 'PUT', `/api/admin/announcements/${annId}`, { title: '更新' + sfx, body: '新正文' });
+    check('admin edits announcement', r.status === 200 && r.data.announcement?.title === '更新' + sfx);
+    r = await api(admin, 'POST', `/api/admin/announcements/${annId}/pin`, { pinned: false });
+    check('admin unpins announcement', r.status === 200 && r.data.announcement?.pinned === false);
+    r = await api(mA, 'GET', '/api/my/achievements');
+    const badges = r.data.badges || [];
+    const unlocked = Object.fromEntries(badges.filter((b) => b.unlocked).map((b) => [b.key, true]));
+    check('achievements: catalog has 7 badges', badges.length === 7);
+    check('achievements: first_login unlocked', !!unlocked.first_login);
+    check('achievements: first_chat unlocked after text', !!unlocked.first_chat);
+    check('achievements: image_master unlocked after image', !!unlocked.image_master);
+    check('achievements: suggestion unlocked', !!unlocked.suggestion);
+    check('achievements: high_card unlocked for Q+', !!unlocked.high_card);
+    check('achievements: invite_1 unlocked after successful invite', !!unlocked.invite_1);
+    check('achievements: locked badges still listed', badges.some((b) => !b.unlocked));
+    r = await api(admin, 'GET', '/api/admin/members');
+    const rowA = (r.data.members || []).find((m) => m.id === idA);
+    check('admin member list shows achievement summary', !!rowA?.achievements && rowA.achievements.unlocked >= 5, JSON.stringify(rowA?.achievements));
+    r = await api(admin, 'GET', `/api/admin/members/${idA}/achievements`);
+    check('admin can view member achievements detail', r.status === 200 && (r.data.badges || []).length === 7);
+    // cleanup announcements created here (soft-delete)
+    for (const id of created.announcements || []) {
+      await api(admin, 'DELETE', `/api/admin/announcements/${id}`);
+    }
+    r = await api(mA, 'GET', '/api/announcements');
+    check('deleted announcements hidden from members', !(r.data.announcements || []).some((a) => (created.announcements || []).includes(a.id)));
+    memWsAnn.ws.close();
   }
 
   // --- session rotation ---

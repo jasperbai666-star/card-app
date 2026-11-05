@@ -206,6 +206,20 @@ async function main() {
     await ctx.close();
   }
 
+  // Seed announcement for screenshots (fake data)
+  let shotAnnId = null;
+  {
+    const r = await api(adminJar, 'POST', '/api/admin/announcements', {
+      title: '欢迎加入卡牌俱乐部',
+      body: '本周活动：周五晚 20:00 对决。请遵守匿名聊天规则，勿泄露联系方式。',
+      pinned: true,
+    });
+    if (r.status === 200 && r.data.announcement?.id) {
+      shotAnnId = r.data.announcement.id;
+      ok('seed announcement for screenshots');
+    } else fail('seed announcement for screenshots', JSON.stringify(r));
+  }
+
   // Member view
   {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' });
@@ -221,8 +235,43 @@ async function main() {
     await page.waitForTimeout(600);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'member.png'), fullPage: true });
     ok('screenshot member.png');
+    await page.waitForSelector('#announcePanel .ann-item, #announcePanel .mp-empty', { timeout: 10000 });
+    await page.locator('#announcePanel').scrollIntoViewIfNeeded();
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'announcements.png'), fullPage: true });
+    ok('screenshot announcements.png');
+    await page.waitForSelector('#achievementsPanel .ach-card', { timeout: 10000 });
+    await page.locator('#achievementsPanel').scrollIntoViewIfNeeded();
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'achievements.png'), fullPage: true });
+    ok('screenshot achievements.png');
     await ctx.close();
   }
+
+  // Admin announcements tab
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: 'zh-CN' });
+    const page = await ctx.newPage();
+    await page.goto(`${BASE}/login`, { waitUntil: 'networkidle' });
+    await page.fill('input[name="username"]', creds.user);
+    await page.fill('input[name="password"]', creds.pass);
+    await Promise.all([
+      page.waitForFunction(() => location.pathname === '/admin' || document.querySelector('.tabs')),
+      page.click('button[type="submit"]'),
+    ]);
+    await page.waitForSelector('.tabs', { timeout: 10000 });
+    await page.click('.tab[data-tab="announcements"]');
+    await page.waitForSelector('#annForm', { timeout: 10000 });
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'announcements-admin.png'), fullPage: true });
+    ok('screenshot announcements-admin.png');
+    await ctx.close();
+  }
+
+  // Cleanup seeded announcement + e2e members so live/local aren't polluted when pointed at Render
+  if (shotAnnId) await api(adminJar, 'DELETE', `/api/admin/announcements/${shotAnnId}`);
+  if (m1Id) await api(adminJar, 'DELETE', `/api/admin/members/${m1Id}`);
+  if (m2Id) await api(adminJar, 'DELETE', `/api/admin/members/${m2Id}`);
 
   await browser.close();
 
