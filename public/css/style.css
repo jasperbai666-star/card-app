@@ -746,3 +746,13 @@ th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: u
   .mp-jump { grid-column: 1 / -1; }
   .jg-canvas { max-height: 560px; }
 }
+
+.jg-combo {
+  font-size: .78rem; letter-spacing: .1em; color: #1a1205;
+  padding: 6px 10px; border-radius: 999px;
+  background: linear-gradient(135deg, #fff1bf, var(--g1));
+  border: 1px solid rgba(247,215,122,.5); font-weight: 700;
+}
+.jg-combo.hidden { display: none; }
+.jg-combo strong { font-size: 1rem; }
+.jg-wrap { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }

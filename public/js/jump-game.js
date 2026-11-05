@@ -1,15 +1,33 @@
 /**
- * 跳一跳 — WeChat-style hold-to-charge jump mini-game (canvas, self-hosted).
- * Exposes window.JumpGame = { mount(el, opts), unmount() }
+ * 跳一跳 — WeChat Jump Jump style (Canvas 2D, self-hosted).
+ *
+ * Physics model (matches classic 跳一跳 feel):
+ *  - Hold to charge 0..1; character squashes; power bar fills.
+ *  - Release jumps on a fixed-duration parabolic arc toward the next platform.
+ *  - Horizontal distance = f(power), calibrated so ~55–65% charge lands on a
+ *    typical next platform, short charge undershoots, full charge overshoots.
+ *  - Landing uses world-space hitboxes (circle for cylinder, square for box)
+ *    that match the drawn platform tops — not screen pixels.
+ *
+ * Exposes window.JumpGame = { mount, unmount }
  */
 (() => {
   const GOLD = '#c9a13b';
   const GOLD2 = '#f7d77a';
-  const BG = '#0b0d14';
-  const MAX_POWER = 1;
-  const CHARGE_MS = 1100;
-  const GRAVITY = 0.00135;
-  const BASE_SPEED = 0.28;
+  const BG_TOP = '#141821';
+  const BG_BOT = '#07090f';
+
+  // ---- Tunable world units (keep hitbox + spawn + charge in sync) ----
+  const CHARGE_MS = 1000;          // full power hold time
+  const JUMP_MS = 480;             // flight duration (constant like WeChat)
+  const JUMP_HEIGHT = 1.35;        // peak arc height in world units
+  const MIN_JUMP = 0.55;           // power=0 distance (barely leave pad)
+  const MAX_JUMP = 4.6;            // power=1 distance
+  const GAP_MIN = 1.7;
+  const GAP_MAX = 3.2;             // max gap < MAX_JUMP so full power can clear
+  const SIZE_MIN = 0.9;
+  const SIZE_MAX = 1.25;
+  const CENTER_RATIO = 0.28;       // fraction of half-extent for "perfect"
 
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
   function lerp(a, b, t) { return a + (b - a) * t; }
@@ -18,46 +36,73 @@
     try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return false; }
   }
 
-  /** Project world (x,z) to screen with mild isometric tilt. */
+  /** Classic mild isometric: +z goes down-right, +x goes down-left. */
   function project(x, z, w, h, camX, camZ) {
     const dx = x - camX;
     const dz = z - camZ;
-    const sx = w * 0.5 + dx * 42 - dz * 22;
-    const sy = h * 0.62 + dx * 18 + dz * 28;
-    return { x: sx, y: sy };
+    const scale = Math.min(w, h) * 0.11;
+    return {
+      x: w * 0.5 + (dx - dz) * scale * 0.85,
+      y: h * 0.58 + (dx + dz) * scale * 0.48,
+      scale,
+    };
+  }
+
+  function halfExtent(plat) {
+    // World half-size of the walkable top. Drawn size uses the same value.
+    return plat.size * 0.5;
+  }
+
+  /** 0 = miss, 1 = land, 2 = perfect center */
+  function landResult(plat, lx, lz) {
+    const dx = lx - plat.x;
+    const dz = lz - plat.z;
+    const he = halfExtent(plat);
+    if (plat.kind === 'cyl') {
+      const dist = Math.hypot(dx, dz);
+      if (dist > he) return 0;
+      if (dist <= he * CENTER_RATIO) return 2;
+      return 1;
+    }
+    // axis-aligned square top in xz
+    if (Math.abs(dx) > he || Math.abs(dz) > he) return 0;
+    if (Math.abs(dx) <= he * CENTER_RATIO && Math.abs(dz) <= he * CENTER_RATIO) return 2;
+    return 1;
   }
 
   function makePlatform(z, opts = {}) {
-    const kinds = ['box', 'box', 'cyl'];
-    const kind = opts.kind || kinds[Math.floor(Math.random() * kinds.length)];
-    const size = opts.size != null ? opts.size : rand(0.85, 1.25);
-    const hue = opts.hue != null ? opts.hue : rand(28, 48);
+    const kinds = ['box', 'box', 'cyl', 'cyl'];
+    const kind = opts.kind || kinds[(Math.random() * kinds.length) | 0];
+    const size = opts.size != null ? opts.size : rand(SIZE_MIN, SIZE_MAX);
+    const hue = opts.hue != null ? opts.hue : rand(32, 48);
     return {
-      x: opts.x != null ? opts.x : rand(-1.1, 1.1),
+      x: opts.x != null ? opts.x : 0,
       z,
       size,
       kind,
       hue,
-      color: `hsl(${hue} 55% 42%)`,
-      top: `hsl(${hue} 70% 58%)`,
+      color: `hsl(${hue} 52% 38%)`,
+      top: `hsl(${hue} 68% 56%)`,
+      side: `hsl(${hue} 40% 26%)`,
     };
   }
 
   function mount(root, opts = {}) {
     if (!root) return null;
-    unmount();
+    unmount(root);
 
     const reduced = prefersReduced();
     root.innerHTML = `
       <div class="jg-wrap">
         <div class="jg-hud">
           <div class="jg-score">得分 <strong id="jgScore">0</strong></div>
+          <div class="jg-combo hidden" id="jgCombo">连击 ×<strong>1</strong></div>
           <div class="jg-best">最佳 <strong id="jgBest">${Number(opts.best || 0)}</strong></div>
           <button type="button" class="jg-btn ghost" id="jgRestart">重开</button>
         </div>
-        <canvas id="jgCanvas" class="jg-canvas" width="720" height="960" aria-label="跳一跳游戏画布"></canvas>
+        <canvas id="jgCanvas" class="jg-canvas" width="720" height="900" aria-label="跳一跳"></canvas>
         <div class="jg-power"><i id="jgPower"></i></div>
-        <p class="jg-hint" id="jgHint">按住蓄力，松手起跳 · 落到下一座平台得分</p>
+        <p class="jg-hint" id="jgHint">按住蓄力，松手起跳 · 踩中圆心可连击加分</p>
         <div class="jg-over hidden" id="jgOver">
           <div class="jg-over-card">
             <div class="jg-over-title">本局结束</div>
@@ -72,48 +117,79 @@
     const ctx = canvas.getContext('2d');
     const scoreEl = root.querySelector('#jgScore');
     const bestEl = root.querySelector('#jgBest');
+    const comboEl = root.querySelector('#jgCombo');
     const powerEl = root.querySelector('#jgPower');
     const hintEl = root.querySelector('#jgHint');
     const overEl = root.querySelector('#jgOver');
     const finalEl = root.querySelector('#jgFinal');
     const overSub = root.querySelector('#jgOverSub');
 
-    let dpr = Math.min(window.devicePixelRatio || 1, 2);
+    let dpr = 1;
     let W = 360, H = 480;
     let platforms = [];
     let current = 0;
     let score = 0;
     let best = Number(opts.best || 0);
     let combo = 0;
-    let state = 'ready'; // ready | charging | flying | over
+    let state = 'ready'; // ready | charging | flying | falling | over
     let power = 0;
     let chargeStart = 0;
     let camX = 0, camZ = 0, camTX = 0, camTZ = 0;
-    let particle = [];
-    let char = { x: 0, z: 0, y: 0, vx: 0, vz: 0, vy: 0, facing: 0 };
+    let particles = [];
+    let floatTexts = [];
+    let char = { x: 0, z: 0, y: 0, squash: 1 };
+    let flight = null; // { t0, dur, x0,z0,x1,z1 }
+    let fall = null;
     let startedAt = 0;
     let hops = 0;
     let raf = 0;
     let lastTs = 0;
     let pressId = null;
-    let dead = false;
+    let nextDir = 1; // alternate left/right branch like WeChat
 
     function resize() {
-      const rect = canvas.getBoundingClientRect();
-      W = Math.max(280, Math.floor(rect.width));
-      H = Math.max(360, Math.floor(rect.width * 1.25));
+      const parent = canvas.parentElement || canvas;
+      const rect = parent.getBoundingClientRect();
+      W = Math.max(280, Math.floor(rect.width || 360));
+      H = Math.max(380, Math.floor(W * 1.2));
       dpr = Math.min(window.devicePixelRatio || 1, 2);
       canvas.width = Math.floor(W * dpr);
       canvas.height = Math.floor(H * dpr);
+      canvas.style.width = W + 'px';
+      canvas.style.height = H + 'px';
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function updateComboHud() {
+      if (combo >= 2) {
+        comboEl.classList.remove('hidden');
+        comboEl.querySelector('strong').textContent = String(combo);
+      } else {
+        comboEl.classList.add('hidden');
+      }
+    }
+
+    function spawnNext() {
+      const last = platforms[platforms.length - 1];
+      const gap = rand(GAP_MIN, GAP_MAX);
+      // WeChat-style: next platform is roughly along +z with a lateral offset
+      nextDir = Math.random() < 0.5 ? -1 : 1;
+      const lateral = nextDir * rand(0.15, 1.35);
+      const nx = clamp(last.x + lateral, -2.2, 2.2);
+      platforms.push(makePlatform(last.z + gap, { x: nx }));
+      while (platforms.length > 10) {
+        platforms.shift();
+        current = Math.max(0, current - 1);
+      }
     }
 
     function resetGame() {
       platforms = [
         makePlatform(0, { x: 0, size: 1.15, kind: 'box', hue: 40 }),
-        makePlatform(2.2, { size: 1.05 }),
       ];
-      for (let i = 0; i < 4; i++) spawnNext();
+      // First target: moderate gap so ~60% charge lands
+      platforms.push(makePlatform(2.15, { x: 0.55, size: 1.1, kind: 'cyl', hue: 38 }));
+      for (let i = 0; i < 5; i++) spawnNext();
       current = 0;
       score = 0;
       combo = 0;
@@ -121,49 +197,31 @@
       startedAt = 0;
       power = 0;
       state = 'ready';
+      flight = null;
+      fall = null;
       const p0 = platforms[0];
-      char = { x: p0.x, z: p0.z, y: 0, vx: 0, vz: 0, vy: 0, facing: 0 };
-      camX = camTX = p0.x; camZ = camTZ = p0.z;
-      particle = [];
+      char = { x: p0.x, z: p0.z, y: 0, squash: 1 };
+      camX = camTX = p0.x;
+      camZ = camTZ = p0.z;
+      particles = [];
+      floatTexts = [];
       overEl.classList.add('hidden');
       scoreEl.textContent = '0';
       powerEl.style.width = '0%';
-      hintEl.textContent = '按住蓄力，松手起跳 · 落到下一座平台得分';
-      dead = false;
-    }
-
-    function spawnNext() {
-      const last = platforms[platforms.length - 1];
-      const gap = rand(1.55, 2.55);
-      const lateral = rand(-1.35, 1.35);
-      platforms.push(makePlatform(last.z + gap, { x: clamp(last.x + lateral, -1.6, 1.6) }));
-      if (platforms.length > 12) {
-        platforms.shift();
-        current = Math.max(0, current - 1);
-      }
-    }
-
-    function landBonus(plat, lx, lz) {
-      const dx = lx - plat.x;
-      const dz = lz - plat.z;
-      const dist = Math.hypot(dx, dz);
-      const r = plat.size * 0.42;
-      if (dist <= r * 0.28) return 2; // center
-      if (dist <= r) return 1;
-      return 0;
+      hintEl.textContent = '按住蓄力，松手起跳 · 踩中圆心可连击加分';
+      updateComboHud();
     }
 
     function endGame() {
       if (state === 'over') return;
       state = 'over';
-      dead = true;
       finalEl.textContent = String(score);
       const isNew = score > best;
       if (isNew) {
         best = score;
         bestEl.textContent = String(best);
       }
-      overSub.textContent = isNew ? '🎉 新纪录！' : (best ? `个人最佳 ${best}` : '再试一次更稳');
+      overSub.textContent = isNew ? '🎉 新纪录！' : (best ? `个人最佳 ${best}` : '掌握蓄力节奏就能连跳');
       overEl.classList.remove('hidden');
       hintEl.textContent = '游戏结束';
       const durationMs = startedAt ? Date.now() - startedAt : 0;
@@ -173,242 +231,329 @@
     }
 
     function startCharge(id) {
-      if (state !== 'ready' || dead) return;
+      if (state !== 'ready') return;
       pressId = id;
       state = 'charging';
       chargeStart = performance.now();
       power = 0;
       if (!startedAt) startedAt = Date.now();
-      hintEl.textContent = '蓄力中…';
+      hintEl.textContent = '蓄力中…松手起跳';
     }
 
-    function releaseJump(id) {
-      if (state !== 'charging') return;
-      if (pressId != null && id != null && pressId !== id) return;
-      pressId = null;
-      const p = platforms[current];
+    function powerToDistance(pow) {
+      // Ease slightly so mid-range is forgiving (WeChat-like sweet spot)
+      const t = clamp(pow, 0, 1);
+      const eased = t * t * (3 - 2 * t); // smoothstep
+      return lerp(MIN_JUMP, MAX_JUMP, eased);
+    }
+
+    /** Ideal power to land on next platform center (for tests / assist). */
+    function idealPowerForNext() {
+      const cur = platforms[current];
       const next = platforms[current + 1];
-      if (!next) { endGame(); return; }
-      const dx = next.x - p.x;
-      const dz = next.z - p.z;
-      const dist = Math.hypot(dx, dz) || 1;
-      const dirX = dx / dist;
-      const dirZ = dz / dist;
-      const pow = clamp(power, 0.12, MAX_POWER);
-      // Distance scales with power; perfect power ≈ platform gap
-      const jumpDist = lerp(0.55, dist * 1.35, pow);
-      char.vx = dirX * jumpDist * BASE_SPEED * 3.2;
-      char.vz = dirZ * jumpDist * BASE_SPEED * 3.2;
-      char.vy = 0.055 + pow * 0.045;
-      char.facing = Math.atan2(dirX, dirZ);
-      char.y = 0;
+      if (!cur || !next) return 0.55;
+      const dist = Math.hypot(next.x - cur.x, next.z - cur.z);
+      // invert smoothstep roughly via binary search
+      let lo = 0, hi = 1;
+      for (let i = 0; i < 18; i++) {
+        const mid = (lo + hi) / 2;
+        if (powerToDistance(mid) < dist) lo = mid; else hi = mid;
+      }
+      return (lo + hi) / 2;
+    }
+
+    function beginJump(pow) {
+      const cur = platforms[current];
+      const next = platforms[current + 1];
+      if (!cur || !next) { endGame(); return; }
+      const dx = next.x - cur.x;
+      const dz = next.z - cur.z;
+      const gap = Math.hypot(dx, dz) || 1;
+      const dirX = dx / gap;
+      const dirZ = dz / gap;
+      const jumpDist = powerToDistance(pow);
+      const x1 = cur.x + dirX * jumpDist;
+      const z1 = cur.z + dirZ * jumpDist;
+      flight = {
+        t0: performance.now(),
+        dur: reduced ? JUMP_MS * 0.85 : JUMP_MS,
+        x0: cur.x,
+        z0: cur.z,
+        x1,
+        z1,
+      };
+      char.squash = 1;
       state = 'flying';
       power = 0;
       powerEl.style.width = '0%';
       hintEl.textContent = '跳！';
     }
 
-    function update(dt) {
+    function releaseJump(id) {
+      if (state !== 'charging') return;
+      if (pressId != null && id != null && pressId !== id) return;
+      pressId = null;
+      const held = performance.now() - chargeStart;
+      const pow = clamp(held / CHARGE_MS, 0.05, 1);
+      beginJump(pow);
+    }
+
+    function onLanded(hit, lx, lz) {
+      const next = platforms[current + 1];
+      if (hit === 0 || !next) {
+        // fall off
+        fall = {
+          t0: performance.now(),
+          x: lx,
+          z: lz,
+          y: 0,
+        };
+        state = 'falling';
+        hintEl.textContent = '没踩稳…';
+        return;
+      }
+      current += 1;
+      hops += 1;
+      char.x = next.x;
+      char.z = next.z;
+      char.y = 0;
+      char.squash = 1;
+      camTX = next.x;
+      camTZ = next.z;
+
+      let add;
+      if (hit === 2) {
+        combo += 1;
+        add = combo; // WeChat: perfect gives combo points (1,2,3…)
+        hintEl.textContent = combo >= 2 ? `完美落地！连击 ×${combo}` : '完美落地！';
+        floatTexts.push({ text: combo >= 2 ? `×${combo}` : '+1 完美', x: next.x, z: next.z, life: 700 });
+      } else {
+        combo = 0;
+        add = 1;
+        hintEl.textContent = '稳！继续蓄力';
+        floatTexts.push({ text: '+1', x: next.x, z: next.z, life: 600 });
+      }
+      score += add;
+      scoreEl.textContent = String(score);
+      updateComboHud();
+      spawnNext();
+      state = 'ready';
+
+      const n = reduced ? 5 : 12;
+      for (let i = 0; i < n; i++) {
+        particles.push({
+          x: next.x, z: next.z, y: 0.15,
+          vx: rand(-0.008, 0.008), vz: rand(-0.008, 0.008), vy: rand(0.012, 0.028),
+          life: rand(280, 650),
+        });
+      }
+    }
+
+    function update(now, dt) {
       if (state === 'charging') {
-        const t = (performance.now() - chargeStart) / CHARGE_MS;
-        power = clamp(t, 0, MAX_POWER);
+        power = clamp((now - chargeStart) / CHARGE_MS, 0, 1);
         powerEl.style.width = `${power * 100}%`;
-        // breathe squash
-        char.y = -power * 0.08;
+        char.squash = 1 - power * 0.35;
+        char.y = 0;
       }
 
-      if (state === 'flying') {
-        char.x += char.vx * dt;
-        char.z += char.vz * dt;
-        char.vy -= GRAVITY * dt * (reduced ? 0.85 : 1);
-        char.y += char.vy * dt;
-        if (char.y <= 0) {
-          char.y = 0;
+      if (state === 'flying' && flight) {
+        const u = clamp((now - flight.t0) / flight.dur, 0, 1);
+        char.x = lerp(flight.x0, flight.x1, u);
+        char.z = lerp(flight.z0, flight.z1, u);
+        char.y = Math.sin(u * Math.PI) * JUMP_HEIGHT;
+        char.squash = 1 + Math.sin(u * Math.PI) * 0.12;
+        if (u >= 1) {
+          const lx = flight.x1;
+          const lz = flight.z1;
+          flight = null;
           const next = platforms[current + 1];
-          const hit = next ? landBonus(next, char.x, char.z) : 0;
-          if (hit > 0) {
-            current += 1;
-            hops += 1;
-            char.x = next.x;
-            char.z = next.z;
-            char.vx = char.vz = char.vy = 0;
-            const add = hit === 2 ? 2 : 1;
-            if (hit === 2) combo += 1; else combo = 0;
-            score += add + (combo >= 2 ? 1 : 0);
-            scoreEl.textContent = String(score);
-            camTX = next.x; camTZ = next.z;
-            spawnNext();
-            state = 'ready';
-            hintEl.textContent = hit === 2 ? '正中红心 +2！' : '稳！继续蓄力';
-            // sparkles
-            for (let i = 0; i < (reduced ? 4 : 10); i++) {
-              particle.push({
-                x: next.x, z: next.z, y: 0.2,
-                vx: rand(-0.01, 0.01), vz: rand(-0.01, 0.01), vy: rand(0.01, 0.03),
-                life: rand(300, 700),
-              });
-            }
-          } else {
-            // miss — fall a bit then over
-            endGame();
-          }
+          const hit = next ? landResult(next, lx, lz) : 0;
+          onLanded(hit, lx, lz);
         }
       }
 
-      // camera follow
-      const k = reduced ? 0.12 : 0.08;
+      if (state === 'falling' && fall) {
+        const t = now - fall.t0;
+        char.x = fall.x;
+        char.z = fall.z;
+        char.y = -t * 0.004;
+        char.squash = 1;
+        if (t > 420) endGame();
+      }
+
+      const k = reduced ? 0.16 : 0.1;
       camX = lerp(camX, camTX, 1 - Math.pow(1 - k, dt / 16));
       camZ = lerp(camZ, camTZ, 1 - Math.pow(1 - k, dt / 16));
 
-      particle = particle.filter((p) => {
+      particles = particles.filter((p) => {
         p.life -= dt;
-        p.x += p.vx * dt; p.z += p.vz * dt; p.y += p.vy * dt; p.vy -= 0.0002 * dt;
+        p.x += p.vx * dt; p.z += p.vz * dt; p.y += p.vy * dt; p.vy -= 0.00018 * dt;
         return p.life > 0;
+      });
+      floatTexts = floatTexts.filter((f) => {
+        f.life -= dt;
+        return f.life > 0;
       });
     }
 
-    function drawPlatform(p, alpha = 1) {
-      const top = project(p.x, p.z, W, H, camX, camZ);
-      const s = p.size * 38;
+    function drawPlatform(p, alpha) {
+      const pr = project(p.x, p.z, W, H, camX, camZ);
+      const s = halfExtent(p) * 2 * pr.scale; // full width in px roughly
+      const he = s * 0.55;
+      const ve = s * 0.32;
+      const depth = s * 0.42;
       ctx.save();
       ctx.globalAlpha = alpha;
+
       if (p.kind === 'cyl') {
-        // ellipse cylinder
+        // body
         ctx.fillStyle = p.color;
         ctx.beginPath();
-        ctx.ellipse(top.x, top.y + s * 0.35, s * 0.7, s * 0.28, 0, 0, Math.PI * 2);
+        ctx.ellipse(pr.x, pr.y + depth * 0.55, he, ve, 0, 0, Math.PI * 2);
         ctx.fill();
+        ctx.fillRect(pr.x - he, pr.y, he * 2, depth * 0.55);
+        ctx.fillStyle = p.side;
+        ctx.beginPath();
+        ctx.ellipse(pr.x, pr.y + depth * 0.55, he, ve, 0, 0, Math.PI);
+        ctx.fill();
+        // top
         ctx.fillStyle = p.top;
         ctx.beginPath();
-        ctx.ellipse(top.x, top.y, s * 0.7, s * 0.28, 0, 0, Math.PI * 2);
+        ctx.ellipse(pr.x, pr.y, he, ve, 0, 0, Math.PI * 2);
         ctx.fill();
-        // center target
-        ctx.strokeStyle = 'rgba(255,230,150,.55)';
+        ctx.strokeStyle = 'rgba(255,232,160,.7)';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.ellipse(top.x, top.y, s * 0.18, s * 0.08, 0, 0, Math.PI * 2);
+        ctx.ellipse(pr.x, pr.y, he * CENTER_RATIO, ve * CENTER_RATIO, 0, 0, Math.PI * 2);
         ctx.stroke();
       } else {
-        // isometric box
-        const hw = s * 0.7, hh = s * 0.45, hz = s * 0.55;
+        const hw = he, hh = ve, hz = depth;
+        // left face
         ctx.fillStyle = p.color;
         ctx.beginPath();
-        ctx.moveTo(top.x, top.y + hh);
-        ctx.lineTo(top.x - hw, top.y + hh * 0.55);
-        ctx.lineTo(top.x - hw, top.y + hh * 0.55 + hz);
-        ctx.lineTo(top.x, top.y + hh + hz);
+        ctx.moveTo(pr.x, pr.y + hh);
+        ctx.lineTo(pr.x - hw, pr.y + hh * 0.45);
+        ctx.lineTo(pr.x - hw, pr.y + hh * 0.45 + hz);
+        ctx.lineTo(pr.x, pr.y + hh + hz);
         ctx.closePath();
         ctx.fill();
-        ctx.fillStyle = `hsl(${p.hue} 40% 28%)`;
+        // right face
+        ctx.fillStyle = p.side;
         ctx.beginPath();
-        ctx.moveTo(top.x, top.y + hh);
-        ctx.lineTo(top.x + hw, top.y + hh * 0.55);
-        ctx.lineTo(top.x + hw, top.y + hh * 0.55 + hz);
-        ctx.lineTo(top.x, top.y + hh + hz);
+        ctx.moveTo(pr.x, pr.y + hh);
+        ctx.lineTo(pr.x + hw, pr.y + hh * 0.45);
+        ctx.lineTo(pr.x + hw, pr.y + hh * 0.45 + hz);
+        ctx.lineTo(pr.x, pr.y + hh + hz);
         ctx.closePath();
         ctx.fill();
+        // top diamond
         ctx.fillStyle = p.top;
         ctx.beginPath();
-        ctx.moveTo(top.x, top.y);
-        ctx.lineTo(top.x + hw, top.y + hh * 0.55);
-        ctx.lineTo(top.x, top.y + hh);
-        ctx.lineTo(top.x - hw, top.y + hh * 0.55);
+        ctx.moveTo(pr.x, pr.y);
+        ctx.lineTo(pr.x + hw, pr.y + hh * 0.45);
+        ctx.lineTo(pr.x, pr.y + hh);
+        ctx.lineTo(pr.x - hw, pr.y + hh * 0.45);
         ctx.closePath();
         ctx.fill();
-        ctx.strokeStyle = 'rgba(255,230,150,.5)';
+        ctx.strokeStyle = 'rgba(255,232,160,.65)';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.ellipse(top.x, top.y + hh * 0.5, s * 0.14, s * 0.07, 0, 0, Math.PI * 2);
+        ctx.ellipse(pr.x, pr.y + hh * 0.45, he * CENTER_RATIO * 0.9, ve * CENTER_RATIO, 0, 0, Math.PI * 2);
         ctx.stroke();
       }
-      // gold rim
-      ctx.strokeStyle = 'rgba(247,215,122,.25)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
       ctx.restore();
     }
 
     function drawChar() {
-      const squash = state === 'charging' ? 1 - power * 0.25 : 1;
-      const stretch = state === 'flying' ? 1.15 : 1;
-      const foot = project(char.x, char.z, W, H, camX, camZ);
-      const yOff = -char.y * 90;
-      const cx = foot.x;
-      const cy = foot.y + yOff - 18;
-      ctx.save();
-      // shadow
-      ctx.fillStyle = 'rgba(0,0,0,.35)';
+      const pr = project(char.x, char.z, W, H, camX, camZ);
+      const yOff = -char.y * pr.scale * 0.95;
+      const squash = char.squash;
+      const cx = pr.x;
+      const cy = pr.y + yOff - 10;
+      // shadow on ground
+      const ground = project(char.x, char.z, W, H, camX, camZ);
+      ctx.fillStyle = 'rgba(0,0,0,.4)';
       ctx.beginPath();
-      ctx.ellipse(foot.x, foot.y + 8, 14 * squash, 6 * squash, 0, 0, Math.PI * 2);
+      ctx.ellipse(ground.x, ground.y + 6, 12 / squash, 5 * squash, 0, 0, Math.PI * 2);
       ctx.fill();
-      // body
-      const grd = ctx.createLinearGradient(cx, cy - 22, cx, cy + 10);
+      // body (chess-piece / WeChat-like stubby figure)
+      const grd = ctx.createLinearGradient(cx, cy - 20, cx, cy + 12);
       grd.addColorStop(0, GOLD2);
       grd.addColorStop(1, GOLD);
       ctx.fillStyle = grd;
       ctx.beginPath();
-      ctx.ellipse(cx, cy, 11 * squash, 16 * stretch * squash, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy, 12 * squash, 15 / squash, 0, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = '#1a1205';
       ctx.beginPath();
-      ctx.arc(cx - 3, cy - 4, 2, 0, Math.PI * 2);
-      ctx.arc(cx + 4, cy - 4, 2, 0, Math.PI * 2);
+      ctx.arc(cx - 3.5, cy - 3, 2.1, 0, Math.PI * 2);
+      ctx.arc(cx + 4, cy - 3, 2.1, 0, Math.PI * 2);
       ctx.fill();
-      ctx.restore();
     }
 
     function draw(ts) {
-      if (dead && state === 'over' && !overEl.classList.contains('hidden')) {
-        // still draw frozen frame once in a while
-      }
-      const dt = lastTs ? clamp(ts - lastTs, 8, 40) : 16;
+      const dt = lastTs ? clamp(ts - lastTs, 8, 34) : 16;
       lastTs = ts;
-      if (state !== 'over') update(dt);
+      if (state !== 'over') update(ts, dt);
 
       ctx.clearRect(0, 0, W, H);
-      // stage bg
       const bg = ctx.createLinearGradient(0, 0, 0, H);
-      bg.addColorStop(0, '#12161f');
-      bg.addColorStop(0.55, BG);
-      bg.addColorStop(1, '#07080c');
+      bg.addColorStop(0, BG_TOP);
+      bg.addColorStop(1, BG_BOT);
       ctx.fillStyle = bg;
       ctx.fillRect(0, 0, W, H);
-      // vignette gold dust
-      ctx.fillStyle = 'rgba(201,161,59,.05)';
-      for (let i = 0; i < 12; i++) {
-        ctx.beginPath();
-        ctx.arc((i * 97 + camZ * 10) % W, (i * 53 + 40) % H, 1.2, 0, Math.PI * 2);
-        ctx.fill();
+
+      // floor grid hint
+      ctx.strokeStyle = 'rgba(247,215,122,.05)';
+      ctx.lineWidth = 1;
+      for (let i = -6; i <= 10; i++) {
+        const a = project(-3, camZ + i * 0.8, W, H, camX, camZ);
+        const b = project(3, camZ + i * 0.8, W, H, camX, camZ);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
       }
 
-      // draw platforms back-to-front by z
-      const order = platforms.map((p, i) => ({ p, i })).sort((a, b) => a.p.z - b.p.z);
+      const order = platforms
+        .map((p, i) => ({ p, i }))
+        .filter(({ i }) => i >= current - 1)
+        .sort((a, b) => (a.p.x + a.p.z) - (b.p.x + b.p.z));
       for (const { p, i } of order) {
-        if (i < current - 1) continue;
-        drawPlatform(p, i < current ? 0.45 : 1);
+        drawPlatform(p, i < current ? 0.4 : 1);
       }
-      for (const pt of particle) {
+
+      for (const pt of particles) {
         const s = project(pt.x, pt.z, W, H, camX, camZ);
-        ctx.fillStyle = `rgba(247,215,122,${clamp(pt.life / 700, 0, 1)})`;
-        ctx.fillRect(s.x, s.y - pt.y * 80, 3, 3);
+        ctx.fillStyle = `rgba(247,215,122,${clamp(pt.life / 650, 0, 1)})`;
+        ctx.fillRect(s.x - 1.5, s.y - pt.y * 70, 3, 3);
       }
+
       drawChar();
 
-      // charging ring
+      for (const f of floatTexts) {
+        const s = project(f.x, f.z, W, H, camX, camZ);
+        const age = 1 - f.life / 700;
+        ctx.globalAlpha = clamp(f.life / 400, 0, 1);
+        ctx.fillStyle = GOLD2;
+        ctx.font = 'bold 16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(f.text, s.x, s.y - 40 - age * 28);
+        ctx.globalAlpha = 1;
+      }
+
       if (state === 'charging') {
         const p = platforms[current];
         const s = project(p.x, p.z, W, H, camX, camZ);
-        ctx.strokeStyle = `rgba(247,215,122,${0.3 + power * 0.6})`;
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = `rgba(247,215,122,${0.35 + power * 0.55})`;
+        ctx.lineWidth = 2.5;
         ctx.beginPath();
-        ctx.arc(s.x, s.y - 40, 10 + power * 28, 0, Math.PI * 2);
+        ctx.arc(s.x, s.y - 36, 8 + power * 30, 0, Math.PI * 2);
         ctx.stroke();
       }
 
       raf = requestAnimationFrame(draw);
     }
 
-    // input
+    // ---- Input (pointer = mouse + touch) ----
     const onDown = (e) => {
       e.preventDefault();
       const id = e.pointerId != null ? e.pointerId : 'm';
@@ -420,10 +565,15 @@
       const id = e.pointerId != null ? e.pointerId : 'm';
       releaseJump(id);
     };
-    canvas.addEventListener('pointerdown', onDown);
-    canvas.addEventListener('pointerup', onUp);
-    canvas.addEventListener('pointercancel', onUp);
+    canvas.addEventListener('pointerdown', onDown, { passive: false });
+    canvas.addEventListener('pointerup', onUp, { passive: false });
+    canvas.addEventListener('pointercancel', onUp, { passive: false });
+    canvas.addEventListener('lostpointercapture', onUp);
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    // Prevent iOS long-press / scroll while playing
+    canvas.style.touchAction = 'none';
+    canvas.style.webkitUserSelect = 'none';
+    canvas.style.userSelect = 'none';
 
     root.querySelector('#jgRestart').onclick = () => resetGame();
     root.querySelector('#jgAgain').onclick = () => resetGame();
@@ -448,6 +598,24 @@
         best = Number(n) || 0;
         bestEl.textContent = String(best);
       },
+      /** Test/automation: jump with given power (0..1) or ideal power. Returns promise of {hit, score, hops, state}. */
+      async simulateJump(powerOrIdeal = 'ideal') {
+        if (state !== 'ready') return { ok: false, reason: 'busy', state };
+        const pow = powerOrIdeal === 'ideal' ? idealPowerForNext() : clamp(Number(powerOrIdeal), 0.05, 1);
+        beginJump(pow);
+        const t0 = performance.now();
+        while (state === 'flying' || state === 'falling') {
+          await new Promise((r) => setTimeout(r, 16));
+          if (performance.now() - t0 > 3000) break;
+        }
+        // allow fall→over
+        if (state === 'falling') {
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        return { ok: true, score, hops, state, combo };
+      },
+      getState: () => ({ score, hops, state, combo, current, platforms: platforms.length }),
+      idealPowerForNext,
     };
     return root._jg;
   }
@@ -457,5 +625,14 @@
     if (el && el._jg) el._jg.destroy();
   }
 
-  window.JumpGame = { mount, unmount };
+  // Pure helpers exported for node unit test via vm if needed
+  window.JumpGame = {
+    mount,
+    unmount,
+    _internals: { powerToDistance: (pow) => {
+      const t = clamp(pow, 0, 1);
+      const eased = t * t * (3 - 2 * t);
+      return lerp(MIN_JUMP, MAX_JUMP, eased);
+    }, landResult, halfExtent, MIN_JUMP, MAX_JUMP, GAP_MIN, GAP_MAX },
+  };
 })();

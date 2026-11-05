@@ -1545,8 +1545,10 @@ app.post('/api/jump/score', requireAuth, jumpScoreLimiter, ah(async (req, res) =
   if (score > JUMP_MAX_SCORE) return res.status(400).json({ error: '分数超出合理范围' });
   if (Number.isFinite(hops) && hops >= 0) {
     if (hops > JUMP_MAX_SCORE + 5) return res.status(400).json({ error: '跳跃次数异常' });
-    // score roughly <= hops * 3 (center + combo padding)
-    if (score > hops * 3 + 5) return res.status(400).json({ error: '分数与跳跃次数不匹配' });
+    // WeChat combo: perfect lands award 1,2,3… so score can be ~ hops*(hops+1)/2
+    const comboCap = Math.floor(hops * (hops + 1) / 2) + hops + 5;
+    const looseCap = hops * 3 + 5;
+    if (score > Math.max(comboCap, looseCap)) return res.status(400).json({ error: '分数与跳跃次数不匹配' });
   }
   if (Number.isFinite(durationMs) && durationMs > 0) {
     // ~1 hop / 350ms absolute floor; reject insanely fast high scores
