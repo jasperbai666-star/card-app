@@ -282,6 +282,33 @@ CREATE TABLE IF NOT EXISTS jump_scores (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_jump_best ON jump_scores(best_score DESC);
+CREATE TABLE IF NOT EXISTS jump_rooms (
+  code TEXT PRIMARY KEY,
+  host_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'waiting',
+  seed INTEGER,
+  turn_user_id INTEGER,
+  max_players INTEGER NOT NULL DEFAULT 8,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jump_rooms_exp ON jump_rooms(expires_at);
+CREATE TABLE IF NOT EXISTS jump_room_players (
+  room_code TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  alias TEXT NOT NULL,
+  role TEXT NOT NULL,
+  ready INTEGER NOT NULL DEFAULT 0,
+  score INTEGER NOT NULL DEFAULT 0,
+  hops INTEGER NOT NULL DEFAULT 0,
+  finished INTEGER NOT NULL DEFAULT 0,
+  is_host INTEGER NOT NULL DEFAULT 0,
+  joined_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (room_code, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_jump_rp_user ON jump_room_players(user_id);
 `;
 
 
@@ -320,6 +347,33 @@ CREATE TABLE IF NOT EXISTS jump_scores (
   updated_at TEXT NOT NULL DEFAULT (${PG_NOW})
 );
 CREATE INDEX IF NOT EXISTS idx_jump_best ON jump_scores(best_score DESC);
+CREATE TABLE IF NOT EXISTS jump_rooms (
+  code TEXT PRIMARY KEY,
+  host_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'waiting',
+  seed INTEGER,
+  turn_user_id INTEGER,
+  max_players INTEGER NOT NULL DEFAULT 8,
+  created_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  updated_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jump_rooms_exp ON jump_rooms(expires_at);
+CREATE TABLE IF NOT EXISTS jump_room_players (
+  room_code TEXT NOT NULL,
+  user_id INTEGER NOT NULL,
+  alias TEXT NOT NULL,
+  role TEXT NOT NULL,
+  ready INTEGER NOT NULL DEFAULT 0,
+  score INTEGER NOT NULL DEFAULT 0,
+  hops INTEGER NOT NULL DEFAULT 0,
+  finished INTEGER NOT NULL DEFAULT 0,
+  is_host INTEGER NOT NULL DEFAULT 0,
+  joined_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  updated_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  PRIMARY KEY (room_code, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_jump_rp_user ON jump_room_players(user_id);
 `;
 
 const POST_MIGRATIONS = [
@@ -355,7 +409,7 @@ if (isPg) {
     async all(sql, ...p) { return (await q(toPg(sql), p)).rows; },
     async run(sql, ...p) {
       let s = toPg(sql);
-      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+(ws_tokens|user_sessions|login_throttle|chat_images|chat_mutes|announcement_reads|user_achievements|jump_scores)/i.test(s);
+      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+(ws_tokens|user_sessions|login_throttle|chat_images|chat_mutes|announcement_reads|user_achievements|jump_scores|jump_rooms|jump_room_players)/i.test(s);
       if (isInsert) s += ' RETURNING id';
       const r = await q(s, p);
       return { changes: r.rowCount, lastInsertRowid: isInsert && r.rows[0] ? Number(r.rows[0].id) : undefined };

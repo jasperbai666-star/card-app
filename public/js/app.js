@@ -7,6 +7,7 @@
     meta: { ranks: [], suits: [] },
     tab: 'members',
     chatCtrl: null,
+    jumpMulti: null,
   };
 
   function toast(msg) {
@@ -91,6 +92,8 @@
         if (state.user?.role === 'admin' && state.tab === 'announcements') {
           if (state.editingName) state.pendingRefresh = true; else refreshAdminTab();
         }
+      } else if (msg.type && String(msg.type).startsWith('jump_room_')) {
+        if (state.jumpMulti) state.jumpMulti.onWsEvent(msg);
       } else if (msg.type === 'force_logout') {
         toast(msg.reason || '已被强制下线');
         logout();
@@ -140,9 +143,15 @@
       state.user = user;
       const { token } = await api('/api/ws-token', { method: 'POST', body: {} });
       connectWs(token);
+      const roomCode = pendingJumpRoomCode();
       if (location.pathname === '/settings') renderSettings();
+      else if (roomCode) openJumpRoom(roomCode);
       else routeHome();
     } catch {
+      const roomCode = pendingJumpRoomCode();
+      if (roomCode) {
+        try { sessionStorage.setItem('jumpRoomRedirect', roomCode); } catch (_) {}
+      }
       renderAuth(location.pathname === '/register' ? 'register' : 'login');
     }
   }
@@ -215,7 +224,14 @@
         state.user = data.user;
         connectWs(data.wsToken);
         toast(mode === 'register' ? '注册成功' : '登录成功');
-        routeHome();
+        let pendingRoom = null;
+        try { pendingRoom = sessionStorage.getItem('jumpRoomRedirect'); } catch (_) {}
+        if (!pendingRoom) {
+          const m = location.pathname.match(/^\/jump\/r\/([A-Za-z0-9]+)/i);
+          if (m) pendingRoom = m[1];
+        }
+        if (pendingRoom) openJumpRoom(pendingRoom);
+        else routeHome();
       } catch (ex) {
         if (ex.data?.code === 'TOTP_REQUIRED') {
           const w = document.getElementById('totpWrap');
@@ -445,6 +461,7 @@
             <span class="mp-chip gold" id="jumpBestChip">最佳 0</span>
           </div>
           <p class="mp-fine">按住蓄力、松手起跳。落在下一座平台得分，踩中圆心额外加分。排行榜对成员只显示匿名代号。</p>
+          <div id="jumpMultiEntry"></div>
           <div id="jumpGameRoot" class="jg-root"></div>
           <div class="mp-head" style="margin-top:14px"><h2>排行榜</h2><span class="mp-chip">TOP 20</span></div>
           <div id="jumpBoard"><div class="mp-skel"></div></div>
@@ -750,6 +767,45 @@
   }
 
 
+
+  function pendingJumpRoomCode() {
+    const m = location.pathname.match(/^\/jump\/r\/([A-Za-z0-9]+)/i);
+    if (m) return m[1].toUpperCase();
+    const q = new URLSearchParams(location.search).get('room');
+    if (q) return String(q).toUpperCase();
+    try {
+      const s = sessionStorage.getItem('jumpRoomRedirect');
+      if (s) return String(s).toUpperCase();
+    } catch (_) {}
+    return null;
+  }
+
+  function ensureJumpMulti() {
+    if (state.jumpMulti) return state.jumpMulti;
+    if (!window.JumpMultiUI) return null;
+    state.jumpMulti = JumpMultiUI.createController({
+      api,
+      toast,
+      getWs: () => state.ws,
+      getUser: () => state.user,
+      navigate: (path) => {
+        try { sessionStorage.removeItem('jumpRoomRedirect'); } catch (_) {}
+        if (path === '/member' || path === '/admin') routeHome();
+        else history.replaceState(null, '', path);
+      },
+    });
+    return state.jumpMulti;
+  }
+
+  async function openJumpRoom(code) {
+    try { sessionStorage.removeItem('jumpRoomRedirect'); } catch (_) {}
+    const ctrl = ensureJumpMulti();
+    if (!ctrl) { toast('联机模块未加载'); return routeHome(); }
+    history.replaceState(null, '', '/jump/r/' + String(code).toUpperCase());
+    app.innerHTML = `<div class="shell"><div id="jumpRoomPage" class="jmr-page"><div class="mp-skel"></div></div></div>`;
+    await ctrl.openIn(document.getElementById('jumpRoomPage'), code);
+  }
+
   async function loadJumpGame() {
     const root = document.getElementById('jumpGameRoot');
     const chip = document.getElementById('jumpBestChip');
@@ -784,6 +840,30 @@
       },
     });
     loadJumpBoard();
+    wireJumpMultiEntry();
+  }
+
+  function wireJumpMultiEntry() {
+    const box = document.getElementById('jumpMultiEntry');
+    if (!box || !window.JumpMultiUI) return;
+    box.innerHTML = JumpMultiUI.entryCardHtml();
+    const form = box.querySelector('#jmrJoinForm');
+    box.querySelector('#jmrCreateBtn').onclick = async () => {
+      try {
+        const ctrl = ensureJumpMulti();
+        app.innerHTML = `<div class="shell"><div id="jumpRoomPage" class="jmr-page"><div class="mp-skel"></div></div></div>`;
+        await ctrl.createAndOpen(document.getElementById('jumpRoomPage'));
+      } catch (e) { toast(e.message); routeHome(); }
+    };
+    box.querySelector('#jmrJoinBtn').onclick = () => {
+      form.classList.toggle('hidden');
+    };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const code = new FormData(form).get('code');
+      if (!code) return;
+      openJumpRoom(String(code).trim());
+    };
   }
 
   async function loadJumpBoard() {
@@ -1209,6 +1289,7 @@
           <h2>跳一跳 · 管理端</h2>
           <p class="muted-sm">你可以自己玩；排行榜对你显示真实姓名。成员端仅见匿名代号。</p>
           <div class="mp-chip gold" style="display:inline-block;margin:8px 0">我的最佳 ${Number(me.best || 0)} · 已玩 ${Number(me.gamesPlayed || 0)} 局</div>
+          <div id="jumpMultiEntry"></div>
           <div id="jumpGameRoot" class="jg-root"></div>
         </div>
         <div class="panel" style="margin-top:14px">
@@ -1241,6 +1322,7 @@
           },
         });
       }
+      wireJumpMultiEntry();
     } catch (ex) {
       body.innerHTML = `<div class="panel"><div class="empty">${escapeHtml(ex.message)}</div></div>`;
     }

@@ -27,6 +27,7 @@ const { RANKS, SUITS, validateCard, publicCard, levelOf } = require('./cards');
 const { ensureAdmin } = require('./scripts/setup-admin.js');
 const chat = require('./chat');
 const achievements = require('./achievements');
+const jumpRooms = require('./jump-rooms');
 
 const app = express();
 const server = http.createServer(app);
@@ -335,6 +336,23 @@ wss.on('connection', (ws) => {
       if (msg.type === 'chat_send' && ws._userId) {
         await handleWsChatSend(ws, msg);
       }
+      if (msg.type === 'jump_room_jump' && ws._userId) {
+        await handleWsJumpRoomJump(ws, msg);
+      }
+      if (msg.type === 'jump_room_subscribe' && ws._userId && msg.code) {
+        ws._jumpRoom = String(msg.code).toUpperCase();
+        const room = jumpRooms.getRoom(ws._jumpRoom);
+        if (room) {
+          const user = await findUserById(ws._userId);
+          ws.send(JSON.stringify({
+            type: 'jump_room_state',
+            room: jumpRooms.roomPublic(room, user),
+          }));
+        }
+      }
+      if (msg.type === 'jump_room_unsubscribe' && ws._userId) {
+        ws._jumpRoom = null;
+      }
     } catch (_) {
       /* ignore */
     }
@@ -364,11 +382,54 @@ async function handleWsChatSend(ws, msg) {
   await notifyAchievements(user.id, ['first_chat']);
 }
 
+
+function broadcastJumpRoom(code, payload) {
+  const data = JSON.stringify(payload);
+  const room = jumpRooms.getRoom(code);
+  if (!room) return;
+  const ids = new Set(room.players.map((p) => p.userId));
+  for (const [uid, set] of socketsByUser) {
+    if (!ids.has(uid)) continue;
+    for (const ws of set) {
+      if (ws.readyState === 1) {
+        try { ws.send(data); } catch (_) {}
+      }
+    }
+  }
+  // also notify any spectator sockets subscribed to this room code
+  wss.clients.forEach((ws) => {
+    if (ws.readyState === 1 && ws._jumpRoom === code && ws._userId && !ids.has(ws._userId)) {
+      try { ws.send(data); } catch (_) {}
+    }
+  });
+}
+
+async function handleWsJumpRoomJump(ws, msg) {
+  const user = await findUserById(ws._userId);
+  if (!user || user.disabled) return ws.send(JSON.stringify({ type: 'jump_room_error', error: '未登录' }));
+  const code = String(msg.code || ws._jumpRoom || '').toUpperCase();
+  const power = Number(msg.power);
+  try {
+    const { room, event } = await jumpRooms.submitJump(db, code, user.id, power);
+    broadcastJumpRoom(code, event);
+    broadcastJumpRoom(code, { type: 'jump_room_state', room: jumpRooms.roomPublic(room, null) });
+  } catch (e) {
+    ws.send(JSON.stringify({ type: 'jump_room_error', error: e.message || '跳跃失败', status: e.status || 400 }));
+  }
+}
+
 setInterval(() => {
   db.run(`DELETE FROM ws_tokens WHERE expires_at <= ?`, nowText()).catch(() => {});
   db.run(`DELETE FROM user_sessions WHERE last_seen <= ?`, nowText(-SESSION_MAX_AGE)).catch(() => {});
   db.run(`DELETE FROM login_throttle WHERE (locked_until IS NULL OR locked_until <= ?) AND first_fail_at <= ?`, nowText(), nowText(-60 * 60 * 1000)).catch(() => {});
   db.run(`DELETE FROM login_audit WHERE created_at <= ?`, nowText(-90 * 86400000)).catch(() => {});
+  try {
+    const gone = jumpRooms.expireIdle();
+    for (const code of gone) {
+      db.run('DELETE FROM jump_room_players WHERE room_code = ?', code).catch(() => {});
+      db.run('DELETE FROM jump_rooms WHERE code = ?', code).catch(() => {});
+    }
+  } catch (_) {}
 }, 60_000);
 
 // Keep-alive pings (also keeps Render's proxy from closing idle sockets)
@@ -465,6 +526,11 @@ const jumpScoreLimiter = rateLimit({
   windowMs: 60 * 1000, limit: 8, standardHeaders: 'draft-7', legacyHeaders: false,
   keyGenerator: (req) => 'jump' + (req.session?.userId || 'anon'),
   handler: limitJson('提交太频繁，请稍后再试'),
+});
+const jumpRoomLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false,
+  keyGenerator: (req) => 'jrm' + (req.session?.userId || 'anon'),
+  handler: limitJson('房间操作太频繁，请稍后再试'),
 });
 const sensitiveLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false,
@@ -1133,6 +1199,7 @@ app.delete('/api/admin/members/:id', requireAdmin, ah(async (req, res) => {
     await tx.run(`DELETE FROM user_achievements WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM announcement_reads WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM jump_scores WHERE user_id = ?`, id);
+    await tx.run(`DELETE FROM jump_room_players WHERE user_id = ?`, id);
     // Codes the member used: detach and mark revoked so they can never be re-used.
     await tx.run(`UPDATE invite_codes SET used_by = NULL, used_at = NULL, revoked = 1 WHERE used_by = ?`, id);
     // Codes the member issued: revoke unused ones and detach creator. Members they invited keep
@@ -1607,8 +1674,126 @@ app.post('/api/jump/score', requireAuth, jumpScoreLimiter, ah(async (req, res) =
   });
 }));
 
+
+// ---------- Jump rooms (multiplayer) ----------
+function jumpPublicBase(req) {
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${proto}://${host}`;
+}
+
+app.post('/api/jump/rooms', requireAuth, jumpRoomLimiter, ah(async (req, res) => {
+  await ensureChatAlias(req);
+  const alias = jumpAliasFor(req);
+  const room = await jumpRooms.createRoom(db, { user: req.user, alias });
+  const share = jumpRooms.shareText(room, jumpPublicBase(req));
+  broadcastJumpRoom(room.code, { type: 'jump_room_state', room: jumpRooms.roomPublic(room, req.user) });
+  res.json({ room: jumpRooms.roomPublic(room, req.user), share });
+}));
+
+app.get('/api/jump/rooms/:code', requireAuth, ah(async (req, res) => {
+  const room = jumpRooms.getRoom(req.params.code);
+  if (!room) return res.status(404).json({ error: '房间不存在或已过期' });
+  res.json({ room: jumpRooms.roomPublic(room, req.user), share: jumpRooms.shareText(room, jumpPublicBase(req)) });
+}));
+
+app.post('/api/jump/rooms/:code/join', requireAuth, jumpRoomLimiter, ah(async (req, res) => {
+  await ensureChatAlias(req);
+  const alias = jumpAliasFor(req);
+  try {
+    const room = await jumpRooms.joinRoom(db, req.params.code, { user: req.user, alias });
+    const pub = jumpRooms.roomPublic(room, req.user);
+    broadcastJumpRoom(room.code, { type: 'jump_room_state', room: jumpRooms.roomPublic(room, null) });
+    res.json({ room: pub, share: jumpRooms.shareText(room, jumpPublicBase(req)) });
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message || '加入失败' });
+  }
+}));
+
+app.post('/api/jump/rooms/:code/leave', requireAuth, jumpRoomLimiter, ah(async (req, res) => {
+  const code = String(req.params.code || '').toUpperCase();
+  const room = await jumpRooms.leaveRoom(db, code, req.user.id);
+  if (room) broadcastJumpRoom(code, { type: 'jump_room_state', room: jumpRooms.roomPublic(room, null) });
+  else broadcastJumpRoom(code, { type: 'jump_room_closed', code });
+  res.json({ ok: true });
+}));
+
+app.post('/api/jump/rooms/:code/ready', requireAuth, jumpRoomLimiter, ah(async (req, res) => {
+  try {
+    const room = await jumpRooms.setReady(db, req.params.code, req.user.id, req.body?.ready !== false);
+    broadcastJumpRoom(room.code, { type: 'jump_room_state', room: jumpRooms.roomPublic(room, null) });
+    res.json({ room: jumpRooms.roomPublic(room, req.user) });
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message || '操作失败' });
+  }
+}));
+
+app.post('/api/jump/rooms/:code/start', requireAuth, jumpRoomLimiter, ah(async (req, res) => {
+  try {
+    const room = await jumpRooms.startGame(db, req.params.code, req.user.id);
+    const payload = {
+      type: 'jump_room_started',
+      room: jumpRooms.roomPublic(room, null),
+      seed: room.seed,
+      platforms: room.platforms.map((pl) => ({ x: pl.x, z: pl.z, size: pl.size, kind: pl.kind, hue: pl.hue })),
+    };
+    broadcastJumpRoom(room.code, payload);
+    broadcastJumpRoom(room.code, { type: 'jump_room_state', room: jumpRooms.roomPublic(room, null) });
+    res.json({
+      room: jumpRooms.roomPublic(room, req.user),
+      seed: room.seed,
+      platforms: payload.platforms,
+    });
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message || '无法开始' });
+  }
+}));
+
+app.post('/api/jump/rooms/:code/jump', requireAuth, jumpRoomLimiter, ah(async (req, res) => {
+  try {
+    const { room, event } = await jumpRooms.submitJump(db, req.params.code, req.user.id, req.body?.power);
+    broadcastJumpRoom(room.code, event);
+    broadcastJumpRoom(room.code, { type: 'jump_room_state', room: jumpRooms.roomPublic(room, null) });
+    res.json({ ok: true, event, room: jumpRooms.roomPublic(room, req.user) });
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message || '跳跃失败' });
+  }
+}));
+
+app.post('/api/jump/rooms/:code/kick', requireAuth, jumpRoomLimiter, ah(async (req, res) => {
+  const targetId = Number(req.body?.userId);
+  if (!Number.isFinite(targetId)) return res.status(400).json({ error: '目标无效' });
+  try {
+    const room = await jumpRooms.kick(db, req.params.code, req.user.id, targetId);
+    if (room) broadcastJumpRoom(room.code, { type: 'jump_room_state', room: jumpRooms.roomPublic(room, null) });
+    sendToUser(targetId, { type: 'jump_room_kicked', code: String(req.params.code).toUpperCase() });
+    res.json({ room: room ? jumpRooms.roomPublic(room, req.user) : null });
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message || '踢出失败' });
+  }
+}));
+
+app.post('/api/jump/rooms/:code/rematch', requireAuth, jumpRoomLimiter, ah(async (req, res) => {
+  try {
+    const room = await jumpRooms.rematch(db, req.params.code, req.user.id);
+    broadcastJumpRoom(room.code, { type: 'jump_room_state', room: jumpRooms.roomPublic(room, null) });
+    res.json({ room: jumpRooms.roomPublic(room, req.user), share: jumpRooms.shareText(room, jumpPublicBase(req)) });
+  } catch (e) {
+    res.status(e.status || 400).json({ error: e.message || '无法再来一局' });
+  }
+}));
+
+app.get('/api/jump/rooms/:code/share', requireAuth, ah(async (req, res) => {
+  const room = jumpRooms.getRoom(req.params.code);
+  if (!room) return res.status(404).json({ error: '房间不存在或已过期' });
+  if (!room.players.some((p) => p.userId === req.user.id)) {
+    return res.status(403).json({ error: '你不在此房间' });
+  }
+  res.json(jumpRooms.shareText(room, jumpPublicBase(req)));
+}));
+
 // SPA fallback for clean URLs
-app.get(['/', '/login', '/register', '/admin', '/member', '/settings'], (_req, res) => {
+app.get(['/', '/login', '/register', '/admin', '/member', '/settings', '/jump', '/jump/r/:code'], (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
@@ -1621,6 +1806,7 @@ app.use((err, _req, res, _next) => {
 async function start() {
   await db.init();
   await ensureAdmin();
+  try { await jumpRooms.loadFromDb(db); } catch (e) { console.error('jump rooms warm', e.message); }
   try {
     const bf = await achievements.backfillAll(db);
     if (bf.awarded) console.log(`成就回填: 为 ${bf.members} 名成员补发 ${bf.awarded} 枚勋章`);

@@ -756,3 +756,74 @@ th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: u
 .jg-combo.hidden { display: none; }
 .jg-combo strong { font-size: 1rem; }
 .jg-wrap { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+
+/* ---- Jump multiplayer rooms ---- */
+.jmr-entry {
+  display: flex; flex-direction: column; gap: 10px;
+  margin: 0 0 14px; padding: 12px 14px; border-radius: 14px;
+  background: linear-gradient(135deg, rgba(201,161,59,.12), rgba(20,24,33,.6));
+  border: 1px solid rgba(247,215,122,.22);
+}
+.jmr-entry-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.jmr-join-form { display: flex; gap: 8px; }
+.jmr-join-form.hidden { display: none; }
+.jmr-join-form input {
+  flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid rgba(247,215,122,.25); background: #0c0f16; color: #f7d77a;
+  letter-spacing: .12em; text-transform: uppercase;
+}
+.jmr-page { padding: 12px; max-width: 960px; margin: 0 auto; }
+.jmr-wrap { display: flex; flex-direction: column; gap: 12px; }
+.jmr-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.jmr-title { flex: 1; font-size: 1rem; color: #f7e7b0; }
+.jmr-title strong { color: #f7d77a; letter-spacing: .08em; }
+.jmr-rules {
+  padding: 10px 12px; border-radius: 12px;
+  background: rgba(247,215,122,.06); border: 1px solid rgba(247,215,122,.15);
+  color: #d9c78a; font-size: .85rem; line-height: 1.45;
+}
+.jmr-rules strong { color: #f7d77a; display: block; margin-bottom: 4px; }
+.jmr-share {
+  padding: 12px; border-radius: 14px;
+  background: #10141c; border: 1px dashed rgba(247,215,122,.35);
+}
+.jmr-share-label { font-size: .78rem; letter-spacing: .12em; color: #c9a13b; margin-bottom: 6px; }
+.jmr-share-url {
+  word-break: break-all; font-size: .82rem; color: #f7d77a;
+  padding: 8px 10px; border-radius: 8px; background: #0a0d14; margin-bottom: 8px;
+}
+.jmr-share-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.jmr-body {
+  display: grid; gap: 12px;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 820px) {
+  .jmr-body { grid-template-columns: 280px 1fr; align-items: start; }
+}
+.jmr-side {
+  padding: 12px; border-radius: 14px;
+  background: rgba(14,18,28,.9); border: 1px solid rgba(247,215,122,.18);
+}
+.jmr-players { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.jmr-players li {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; border-radius: 10px; background: rgba(255,255,255,.03);
+  border: 1px solid transparent;
+}
+.jmr-players li.turn { border-color: rgba(247,215,122,.55); box-shadow: 0 0 0 1px rgba(247,215,122,.2); }
+.jmr-players li.done { opacity: .55; }
+.jmr-alias { flex: 1; color: #f0e2b0; font-weight: 600; font-size: .9rem; }
+.jmr-meta { font-size: .75rem; color: #a89868; }
+.jmr-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.jmr-winner {
+  margin-top: 10px; padding: 10px; border-radius: 10px; text-align: center;
+  background: linear-gradient(135deg, rgba(247,215,122,.2), rgba(201,161,59,.08));
+  color: #f7d77a; font-weight: 700;
+}
+.jmr-game { min-width: 0; }
+.jmr-turn {
+  margin-top: 8px; text-align: center; color: #f7d77a;
+  font-size: .9rem; letter-spacing: .04em;
+}
+.jg-btn.sm { padding: 4px 8px; font-size: .72rem; }
+.jg-btn.hidden, .hidden { display: none !important; }

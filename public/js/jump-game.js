@@ -92,13 +92,15 @@
     unmount(root);
 
     const reduced = prefersReduced();
+    const multi = opts.mode === 'multi';
+    let interactive = opts.interactive !== false;
     root.innerHTML = `
       <div class="jg-wrap">
         <div class="jg-hud">
           <div class="jg-score">得分 <strong id="jgScore">0</strong></div>
           <div class="jg-combo hidden" id="jgCombo">连击 ×<strong>1</strong></div>
-          <div class="jg-best">最佳 <strong id="jgBest">${Number(opts.best || 0)}</strong></div>
-          <button type="button" class="jg-btn ghost" id="jgRestart">重开</button>
+          <div class="jg-best">${multi ? '联机' : '最佳'} <strong id="jgBest">${multi ? (opts.hudLabel || '—') : Number(opts.best || 0)}</strong></div>
+          <button type="button" class="jg-btn ghost ${multi ? 'hidden' : ''}" id="jgRestart">重开</button>
         </div>
         <canvas id="jgCanvas" class="jg-canvas" width="720" height="900" aria-label="跳一跳"></canvas>
         <div class="jg-power"><i id="jgPower"></i></div>
@@ -183,13 +185,28 @@
       }
     }
 
-    function resetGame() {
-      platforms = [
-        makePlatform(0, { x: 0, size: 1.15, kind: 'box', hue: 40 }),
-      ];
-      // First target: moderate gap so ~60% charge lands
-      platforms.push(makePlatform(2.15, { x: 0.55, size: 1.1, kind: 'cyl', hue: 38 }));
-      for (let i = 0; i < 5; i++) spawnNext();
+    function colorizePlat(pl) {
+      const hue = pl.hue != null ? pl.hue : 40;
+      return {
+        x: pl.x, z: pl.z, size: pl.size, kind: pl.kind, hue,
+        color: pl.color || `hsl(${hue} 52% 38%)`,
+        top: pl.top || `hsl(${hue} 68% 56%)`,
+        side: pl.side || `hsl(${hue} 40% 26%)`,
+      };
+    }
+
+    function resetGame(externalPlatforms) {
+      if (externalPlatforms && externalPlatforms.length) {
+        platforms = externalPlatforms.map(colorizePlat);
+      } else if (opts.platforms && opts.platforms.length) {
+        platforms = opts.platforms.map(colorizePlat);
+      } else {
+        platforms = [
+          makePlatform(0, { x: 0, size: 1.15, kind: 'box', hue: 40 }),
+        ];
+        platforms.push(makePlatform(2.15, { x: 0.55, size: 1.1, kind: 'cyl', hue: 38 }));
+        for (let i = 0; i < 5; i++) spawnNext();
+      }
       current = 0;
       score = 0;
       combo = 0;
@@ -208,22 +225,26 @@
       overEl.classList.add('hidden');
       scoreEl.textContent = '0';
       powerEl.style.width = '0%';
-      hintEl.textContent = '按住蓄力，松手起跳 · 踩中圆心可连击加分';
+      hintEl.textContent = multi
+        ? (interactive ? '轮到你了 · 按住蓄力松手起跳' : '等待其他玩家…')
+        : '按住蓄力，松手起跳 · 踩中圆心可连击加分';
       updateComboHud();
     }
 
     function endGame() {
       if (state === 'over') return;
       state = 'over';
-      finalEl.textContent = String(score);
-      const isNew = score > best;
-      if (isNew) {
-        best = score;
-        bestEl.textContent = String(best);
+      if (!multi) {
+        finalEl.textContent = String(score);
+        const isNew = score > best;
+        if (isNew) {
+          best = score;
+          bestEl.textContent = String(best);
+        }
+        overSub.textContent = isNew ? '🎉 新纪录！' : (best ? `个人最佳 ${best}` : '掌握蓄力节奏就能连跳');
+        overEl.classList.remove('hidden');
       }
-      overSub.textContent = isNew ? '🎉 新纪录！' : (best ? `个人最佳 ${best}` : '掌握蓄力节奏就能连跳');
-      overEl.classList.remove('hidden');
-      hintEl.textContent = '游戏结束';
+      hintEl.textContent = multi ? '本回合结束' : '游戏结束';
       const durationMs = startedAt ? Date.now() - startedAt : 0;
       if (typeof opts.onGameOver === 'function') {
         opts.onGameOver({ score, best, hops, durationMs, combo });
@@ -231,6 +252,7 @@
     }
 
     function startCharge(id) {
+      if (!interactive) return;
       if (state !== 'ready') return;
       pressId = id;
       state = 'charging';
@@ -295,6 +317,17 @@
       pressId = null;
       const held = performance.now() - chargeStart;
       const pow = clamp(held / CHARGE_MS, 0.05, 1);
+      if (typeof opts.onJumpRequest === 'function') {
+        state = 'ready'; // wait for server; keep char ready
+        power = 0;
+        powerEl.style.width = '0%';
+        char.squash = 1;
+        hintEl.textContent = '同步中…';
+        Promise.resolve(opts.onJumpRequest(pow)).catch(() => {
+          hintEl.textContent = '同步失败，请重试';
+        });
+        return;
+      }
       beginJump(pow);
     }
 
@@ -336,7 +369,10 @@
       score += add;
       scoreEl.textContent = String(score);
       updateComboHud();
-      spawnNext();
+      if (!multi) spawnNext();
+      else if (current >= platforms.length - 3 && typeof opts.onNeedPlatforms === 'function') {
+        opts.onNeedPlatforms(current);
+      }
       state = 'ready';
 
       const n = reduced ? 5 : 12;
@@ -575,7 +611,7 @@
     canvas.style.webkitUserSelect = 'none';
     canvas.style.userSelect = 'none';
 
-    root.querySelector('#jgRestart').onclick = () => resetGame();
+    root.querySelector('#jgRestart').onclick = () => { if (!multi) resetGame(); };
     root.querySelector('#jgAgain').onclick = () => resetGame();
 
     const ro = new ResizeObserver(() => resize());
@@ -598,6 +634,74 @@
         best = Number(n) || 0;
         bestEl.textContent = String(best);
       },
+      setHudLabel(text) {
+        bestEl.textContent = String(text || '—');
+      },
+      setInteractive(v) {
+        interactive = !!v;
+        if (!interactive && state === 'charging') {
+          state = 'ready';
+          power = 0;
+          powerEl.style.width = '0%';
+          char.squash = 1;
+        }
+        hintEl.textContent = interactive ? '轮到你了 · 按住蓄力松手起跳' : '观战中 · 等待其他玩家';
+      },
+      loadWorld(list, idx = 0) {
+        platforms = (list || []).map(colorizePlat);
+        current = idx || 0;
+        score = 0; combo = 0; hops = 0;
+        state = 'ready'; flight = null; fall = null;
+        overEl.classList.add('hidden');
+        const p0 = platforms[current] || platforms[0];
+        if (p0) {
+          char = { x: p0.x, z: p0.z, y: 0, squash: 1 };
+          camX = camTX = p0.x; camZ = camTZ = p0.z;
+        }
+        scoreEl.textContent = '0';
+        updateComboHud();
+      },
+      resetToStart() {
+        resetGame(platforms.length ? platforms : null);
+      },
+      setScore(n, c) {
+        score = Number(n) || 0;
+        if (c != null) combo = Number(c) || 0;
+        scoreEl.textContent = String(score);
+        updateComboHud();
+      },
+      setHint(text) { hintEl.textContent = text || ''; },
+      /** Animate a server-authoritative jump then sync score/idx from result. */
+      async playRemoteJump(pow, serverResult) {
+        beginJump(clamp(Number(pow), 0.05, 1));
+        const t0 = performance.now();
+        while (state === 'flying' || state === 'falling') {
+          await new Promise((r) => setTimeout(r, 16));
+          if (performance.now() - t0 > 3000) break;
+        }
+        if (serverResult) {
+          if (serverResult.miss) {
+            // fall already triggered by local landResult; ensure over
+            if (state !== 'over' && state !== 'falling') endGame();
+          } else {
+            // trust server score/combo/index
+            score = serverResult.score;
+            hops = serverResult.hops;
+            combo = serverResult.combo || 0;
+            current = serverResult.currentIdx;
+            const p = platforms[current];
+            if (p) { char.x = p.x; char.z = p.z; char.y = 0; camTX = p.x; camTZ = p.z; }
+            scoreEl.textContent = String(score);
+            updateComboHud();
+            state = 'ready';
+            overEl.classList.add('hidden');
+          }
+        }
+        if (state === 'falling') {
+          await new Promise((r) => setTimeout(r, 450));
+        }
+        return { score, hops, state, combo, current };
+      },
       /** Test/automation: jump with given power (0..1) or ideal power. Returns promise of {hit, score, hops, state}. */
       async simulateJump(powerOrIdeal = 'ideal') {
         if (state !== 'ready') return { ok: false, reason: 'busy', state };
@@ -608,13 +712,12 @@
           await new Promise((r) => setTimeout(r, 16));
           if (performance.now() - t0 > 3000) break;
         }
-        // allow fall→over
         if (state === 'falling') {
           await new Promise((r) => setTimeout(r, 500));
         }
         return { ok: true, score, hops, state, combo };
       },
-      getState: () => ({ score, hops, state, combo, current, platforms: platforms.length }),
+      getState: () => ({ score, hops, state, combo, current, platforms: platforms.length, interactive }),
       idealPowerForNext,
     };
     return root._jg;

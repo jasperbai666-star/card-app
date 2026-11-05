@@ -378,6 +378,27 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     r = await api(admin, 'GET', '/api/jump/leaderboard');
     check('jump: admin leaderboard includes identity', (r.data.leaderboard || []).some((x) => x.username === ua && x.displayName));
     check('member cannot forge without auth', (await api({}, 'POST', '/api/jump/score', { score: 10, hops: 5, durationMs: 5000 })).status === 401);
+
+    // multiplayer rooms
+    r = await api(mA, 'POST', '/api/jump/rooms', {});
+    check('jump room: create', r.status === 200 && r.data.room?.code && r.data.share?.url);
+    const roomCode = r.data.room.code;
+    r = await api(mB, 'POST', `/api/jump/rooms/${roomCode}/join`, {});
+    check('jump room: join', r.status === 200 && (r.data.room.players || []).length === 2);
+    r = await api(mB, 'POST', `/api/jump/rooms/${roomCode}/ready`, { ready: true });
+    check('jump room: ready', r.status === 200);
+    r = await api(mA, 'POST', `/api/jump/rooms/${roomCode}/start`, {});
+    check('jump room: start', r.status === 200 && r.data.room.status === 'playing' && r.data.seed);
+    const seed = r.data.seed;
+    const plats = require('../jump-physics').generatePlatforms(seed, 30);
+    const ideal0 = require('../jump-physics').idealPower(plats, 0);
+    r = await api(mA, 'POST', `/api/jump/rooms/${roomCode}/jump`, { power: ideal0 });
+    check('jump room: turn jump scores', r.status === 200 && r.data.event && !r.data.event.miss && r.data.event.score > 0);
+    r = await api(mB, 'POST', `/api/jump/rooms/${roomCode}/jump`, { power: 0.5 });
+    check('jump room: out-of-turn blocked', r.status === 403);
+    check('jump room: share route', (await fetch(`${BASE}/jump/r/${roomCode}`)).status === 200);
+    await api(mA, 'POST', `/api/jump/rooms/${roomCode}/leave`, {});
+    await api(mB, 'POST', `/api/jump/rooms/${roomCode}/leave`, {});
   }
 
   // --- session rotation ---
