@@ -203,6 +203,12 @@ async function main() {
     await page.waitForTimeout(600);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'admin.png'), fullPage: true });
     ok('screenshot admin.png');
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'layout-admin.png'), fullPage: true });
+    ok('screenshot layout-admin.png');
+    await page.click('.tab[data-tab="goose"]');
+    await page.waitForSelector('#gooseGameRoot, #tabBody .panel', { timeout: 10000 });
+    await page.waitForTimeout(500);
+    ok('admin goose tab opens');
     await ctx.close();
   }
 
@@ -232,20 +238,26 @@ async function main() {
       page.click('button[type="submit"]'),
     ]);
     await page.waitForSelector('#myCard', { timeout: 10000 });
+    await page.waitForSelector('.mp-tabbar, .mp-side', { timeout: 10000 });
     await page.waitForTimeout(600);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'member.png'), fullPage: true });
     ok('screenshot member.png');
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'layout-member.png'), fullPage: true });
+    ok('screenshot layout-member.png');
     await page.waitForSelector('#announcePanel .ann-item, #announcePanel .mp-empty', { timeout: 10000 });
     await page.locator('#announcePanel').scrollIntoViewIfNeeded();
     await page.waitForTimeout(400);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'announcements.png'), fullPage: true });
     ok('screenshot announcements.png');
+    // 我的 tab → achievements
+    await page.locator('[data-mtab="me"]').first().click();
     await page.waitForSelector('#achievementsPanel .ach-card', { timeout: 10000 });
-    await page.locator('#achievementsPanel').scrollIntoViewIfNeeded();
     await page.waitForTimeout(400);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'achievements.png'), fullPage: true });
     ok('screenshot achievements.png');
-    // seed a jump score so leaderboard isn't empty
+    // 游戏 tab → jump + goose
+    await page.locator('[data-mtab="games"]').first().click();
+    await page.waitForSelector('#jumpPanel', { timeout: 10000 });
     await page.evaluate(async () => {
       await fetch('/api/jump/score', {
         method: 'POST', credentials: 'include',
@@ -253,15 +265,34 @@ async function main() {
         body: JSON.stringify({ score: 12, hops: 10, durationMs: 12000 }),
       });
     });
-    await page.waitForSelector('#jumpPanel', { timeout: 10000 });
-    await page.locator('#jumpPanel').scrollIntoViewIfNeeded();
     await page.waitForTimeout(500);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'jump-game.png'), fullPage: true });
     ok('screenshot jump-game.png');
     await page.locator('#jumpBoard').scrollIntoViewIfNeeded();
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'jump-leaderboard.png'), fullPage: true });
     ok('screenshot jump-leaderboard.png');
+    await page.locator('.mp-game-tab[data-game="goose"]').click();
+    await page.waitForSelector('#gooseGameRoot .gg-board', { timeout: 10000 });
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'goose-game.png'), fullPage: true });
+    ok('screenshot goose-game.png');
+    await page.evaluate(() => {
+      const over = document.querySelector('#ggOver');
+      if (!over) return;
+      over.classList.remove('hidden');
+      const t = document.querySelector('#ggOverTitle');
+      const s = document.querySelector('#ggOverSub');
+      if (t) t.textContent = '🦢 通关成功！';
+      if (s) s.textContent = '用时 0:42 · 消除 36 · 36 步';
+    });
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'goose-win.png'), fullPage: true });
+    ok('screenshot goose-win.png');
+    // chat tab exists
+    await page.locator('[data-mtab="chat"]').first().click();
+    await page.waitForSelector('#chatPanel', { timeout: 10000 });
+    ok('member chat tab opens');
     await ctx.close();
   }
 

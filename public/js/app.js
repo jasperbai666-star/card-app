@@ -6,6 +6,7 @@
     wsConnected: false,
     meta: { ranks: [], suits: [] },
     tab: 'members',
+    memberTab: 'home',
     chatCtrl: null,
     jumpMulti: null,
   };
@@ -145,6 +146,7 @@
       connectWs(token);
       const roomCode = pendingJumpRoomCode();
       if (location.pathname === '/settings') renderSettings();
+      else if (location.pathname === '/games' && state.user?.role === 'member') { state.memberTab = 'games'; renderMember(); }
       else if (roomCode) openJumpRoom(roomCode);
       else routeHome();
     } catch {
@@ -407,10 +409,11 @@
   const REDUCED_MOTION = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function renderMember() {
-    history.replaceState(null, '', '/member');
+    history.replaceState(null, '', state.memberTab === 'games' ? '/games' : '/member');
     const name = state.user.displayName || state.user.username;
+    const tab = state.memberTab || 'home';
     app.innerHTML = `
-      <div class="shell mp">
+      <div class="shell mp mp-app">
         <header class="mp-top">
           <div class="mp-brand">
             <div class="mp-logo" aria-hidden="true">♠</div>
@@ -425,121 +428,162 @@
           </div>
         </header>
 
-        <section class="mp-hero">
-          <div class="mp-stage" id="cardStage">
-            <div class="mp-aura" aria-hidden="true"></div>
-            <div id="myCard" class="mp-card-slot"></div>
-          </div>
-          <div class="mp-cardinfo" id="cardInfo">
-            <div class="mp-skel"></div>
-          </div>
-          <p class="mp-note"><span class="mp-lock">🔒</span> 仅你可见 · 管理员调整后实时同步</p>
-        </section>
+        <div class="mp-body">
+          <nav class="mp-side" aria-label="侧边导航">
+            <button type="button" class="mp-nav-item ${tab === 'home' ? 'active' : ''}" data-mtab="home"><span class="mp-nav-ico" aria-hidden="true">🏠</span><span>首页</span></button>
+            <button type="button" class="mp-nav-item ${tab === 'chat' ? 'active' : ''}" data-mtab="chat"><span class="mp-nav-ico" aria-hidden="true">💬</span><span>聊天</span></button>
+            <button type="button" class="mp-nav-item ${tab === 'games' ? 'active' : ''}" data-mtab="games"><span class="mp-nav-ico" aria-hidden="true">🎮</span><span>游戏</span></button>
+            <button type="button" class="mp-nav-item ${tab === 'me' ? 'active' : ''}" data-mtab="me"><span class="mp-nav-ico" aria-hidden="true">👤</span><span>我的</span></button>
+          </nav>
 
-        <section class="mp-glass mp-wide mp-announce" id="announcePanel">
-          <div class="mp-head">
-            <h2>公告栏</h2>
-            <span class="mp-chip gold" id="announceUnread">0 条未读</span>
-          </div>
-          <div id="announceList"><div class="mp-skel"></div></div>
-          <div class="mp-row" style="justify-content:flex-end;margin-top:8px">
-            <button type="button" class="mp-btn ghost sm" id="announceReadAll">全部标为已读</button>
-          </div>
-        </section>
+          <div class="mp-main">
+            <section class="mp-pane ${tab === 'home' ? '' : 'hidden'}" data-pane="home" id="paneHome">
+              <section class="mp-hero">
+                <div class="mp-stage" id="cardStage">
+                  <div class="mp-aura" aria-hidden="true"></div>
+                  <div id="myCard" class="mp-card-slot"></div>
+                </div>
+                <div class="mp-cardinfo" id="cardInfo"><div class="mp-skel"></div></div>
+                <p class="mp-note"><span class="mp-lock">🔒</span> 仅你可见 · 管理员调整后实时同步</p>
+              </section>
+              <section class="mp-glass mp-wide mp-announce" id="announcePanel">
+                <div class="mp-head">
+                  <h2>公告栏</h2>
+                  <span class="mp-chip gold" id="announceUnread">0 条未读</span>
+                </div>
+                <div id="announceList"><div class="mp-skel"></div></div>
+                <div class="mp-row" style="justify-content:flex-end;margin-top:8px">
+                  <button type="button" class="mp-btn ghost sm" id="announceReadAll">全部标为已读</button>
+                </div>
+              </section>
+            </section>
 
-        <section class="mp-glass mp-wide mp-achievements" id="achievementsPanel">
-          <div class="mp-head">
-            <h2>成就勋章</h2>
-            <span class="mp-chip gold" id="achCount">0 / 0</span>
-          </div>
-          <div class="ach-grid" id="achGrid"><div class="mp-skel"></div></div>
-        </section>
+            <section class="mp-pane ${tab === 'chat' ? '' : 'hidden'}" data-pane="chat" id="paneChat">
+              ${window.ChatUI ? ChatUI.memberShell() : '<div class="mp-glass"><div class="empty">聊天模块未加载</div></div>'}
+            </section>
 
-        <section class="mp-glass mp-wide mp-jump" id="jumpPanel">
-          <div class="mp-head">
-            <h2>小游戏 · 跳一跳</h2>
-            <span class="mp-chip gold" id="jumpBestChip">最佳 0</span>
-          </div>
-          <p class="mp-fine">按住蓄力、松手起跳。落在下一座平台得分，踩中圆心额外加分。排行榜对成员只显示匿名代号。</p>
-          <div id="jumpMultiEntry"></div>
-          <div id="jumpGameRoot" class="jg-root"></div>
-          <div class="mp-head" style="margin-top:14px"><h2>排行榜</h2><span class="mp-chip">TOP 20</span></div>
-          <div id="jumpBoard"><div class="mp-skel"></div></div>
-        </section>
-
-        <div class="mp-grid">
-          ${window.ChatUI ? ChatUI.memberShell() : ''}
-          <section class="mp-glass mp-inviter">
-            <div class="mp-label">我的邀请人</div>
-            <div class="mp-person" id="myInviter"><span class="mp-skel sm"></span></div>
-          </section>
-
-          <section class="mp-glass">
-            <div class="mp-head">
-              <h2>我的邀请码</h2>
-              <span class="mp-chip">每人限 1 个</span>
-            </div>
-            <div id="myInvite"><div class="mp-skel"></div></div>
-            <p class="mp-fine">同一时间只能持有 1 个有效邀请码（7 天有效）。被使用、过期或撤销后，才可生成新的。</p>
-          </section>
-
-          <section class="mp-glass">
-            <div class="mp-head"><h2>我邀请的成员</h2><span class="mp-chip" id="invitedCount">0</span></div>
-            <div id="myInvited"><div class="mp-skel"></div></div>
-          </section>
-
-          <section class="mp-glass mp-wide">
-            <div class="mp-head"><h2>致管理员</h2><span class="mp-chip gold">建议 / 要求</span></div>
-            <form id="sugForm" class="mp-form">
-              <div class="mp-seg" role="radiogroup" aria-label="类型">
-                <label><input type="radio" name="type" value="suggestion" checked /><span>💡 建议</span></label>
-                <label><input type="radio" name="type" value="request" /><span>📌 要求</span></label>
+            <section class="mp-pane ${tab === 'games' ? '' : 'hidden'}" data-pane="games" id="paneGames">
+              <div class="mp-game-tabs" role="tablist" aria-label="小游戏">
+                <button type="button" class="mp-game-tab active" data-game="jump" role="tab" aria-selected="true">跳一跳</button>
+                <button type="button" class="mp-game-tab" data-game="goose" role="tab" aria-selected="false">抓大鹅</button>
               </div>
-              <div class="mp-textarea">
-                <textarea name="content" placeholder="写给管理员的内容…" required maxlength="2000" rows="4"></textarea>
-                <span class="mp-count" id="sugCount">0 / 2000</span>
+              <div id="gameJumpBlock">
+                <section class="mp-glass mp-wide mp-jump" id="jumpPanel">
+                  <div class="mp-head">
+                    <h2>跳一跳</h2>
+                    <span class="mp-chip gold" id="jumpBestChip">最佳 0</span>
+                  </div>
+                  <p class="mp-fine">按住蓄力、松手起跳。落在下一座平台得分，踩中圆心额外加分。排行榜对成员只显示匿名代号。</p>
+                  <div id="jumpMultiEntry"></div>
+                  <div id="jumpGameRoot" class="jg-root"></div>
+                  <div class="mp-head" style="margin-top:14px"><h2>排行榜</h2><span class="mp-chip">TOP 20</span></div>
+                  <div id="jumpBoard"><div class="mp-skel"></div></div>
+                </section>
               </div>
-              <button class="mp-btn gold" type="submit">提交给管理员</button>
-            </form>
-          </section>
+              <div id="gameGooseBlock" class="hidden">
+                <section class="mp-glass mp-wide" id="goosePanel">
+                  <div class="mp-head">
+                    <h2>抓大鹅</h2>
+                    <span class="mp-chip gold" id="gooseBestChip">通关 0</span>
+                  </div>
+                  <p class="mp-fine">点可点击的牌进入 7 格槽位，三个相同消除。清空牌堆通关；槽满失败。撤销 / 打乱各 1 次。</p>
+                  <div id="gooseGameRoot" class="gg-root"></div>
+                  <div class="mp-head" style="margin-top:14px"><h2>通关榜</h2><span class="mp-chip">TOP 20</span></div>
+                  <div id="gooseBoard"><div class="mp-skel"></div></div>
+                </section>
+              </div>
+            </section>
 
-          <section class="mp-glass mp-wide">
-            <div class="mp-head"><h2>我的提交记录</h2></div>
-            <div id="mySugs"><div class="mp-skel"></div></div>
-          </section>
+            <section class="mp-pane ${tab === 'me' ? '' : 'hidden'}" data-pane="me" id="paneMe">
+              <div class="mp-grid">
+                <section class="mp-glass mp-wide mp-achievements" id="achievementsPanel">
+                  <div class="mp-head">
+                    <h2>成就勋章</h2>
+                    <span class="mp-chip gold" id="achCount">0 / 0</span>
+                  </div>
+                  <div class="ach-grid" id="achGrid"><div class="mp-skel"></div></div>
+                </section>
+                <section class="mp-glass mp-inviter">
+                  <div class="mp-label">我的邀请人</div>
+                  <div class="mp-person" id="myInviter"><span class="mp-skel sm"></span></div>
+                </section>
+                <section class="mp-glass">
+                  <div class="mp-head">
+                    <h2>我的邀请码</h2>
+                    <span class="mp-chip">每人限 1 个</span>
+                  </div>
+                  <div id="myInvite"><div class="mp-skel"></div></div>
+                  <p class="mp-fine">同一时间只能持有 1 个有效邀请码（7 天有效）。被使用、过期或撤销后，才可生成新的。</p>
+                </section>
+                <section class="mp-glass">
+                  <div class="mp-head"><h2>我邀请的成员</h2><span class="mp-chip" id="invitedCount">0</span></div>
+                  <div id="myInvited"><div class="mp-skel"></div></div>
+                </section>
+                <section class="mp-glass mp-wide">
+                  <div class="mp-head"><h2>致管理员</h2><span class="mp-chip gold">建议 / 要求</span></div>
+                  <form id="sugForm" class="mp-form">
+                    <div class="mp-seg" role="radiogroup" aria-label="类型">
+                      <label><input type="radio" name="type" value="suggestion" checked /><span>💡 建议</span></label>
+                      <label><input type="radio" name="type" value="request" /><span>📌 要求</span></label>
+                    </div>
+                    <div class="mp-textarea">
+                      <textarea name="content" placeholder="写给管理员的内容…" required maxlength="2000" rows="4"></textarea>
+                      <span class="mp-count" id="sugCount">0 / 2000</span>
+                    </div>
+                    <button class="mp-btn gold" type="submit">提交给管理员</button>
+                  </form>
+                </section>
+                <section class="mp-glass mp-wide">
+                  <div class="mp-head"><h2>我的提交记录</h2></div>
+                  <div id="mySugs"><div class="mp-skel"></div></div>
+                </section>
+              </div>
+            </section>
+          </div>
         </div>
+
+        <nav class="mp-tabbar" aria-label="底部导航">
+          <button type="button" class="mp-tabbar-item ${tab === 'home' ? 'active' : ''}" data-mtab="home"><span aria-hidden="true">🏠</span><span>首页</span></button>
+          <button type="button" class="mp-tabbar-item ${tab === 'chat' ? 'active' : ''}" data-mtab="chat"><span aria-hidden="true">💬</span><span>聊天</span></button>
+          <button type="button" class="mp-tabbar-item ${tab === 'games' ? 'active' : ''}" data-mtab="games"><span aria-hidden="true">🎮</span><span>游戏</span></button>
+          <button type="button" class="mp-tabbar-item ${tab === 'me' ? 'active' : ''}" data-mtab="me"><span aria-hidden="true">👤</span><span>我的</span></button>
+        </nav>
       </div>
     `;
     document.getElementById('logoutBtn').onclick = logout;
     document.getElementById('settingsBtn').onclick = renderSettings;
+    document.querySelectorAll('[data-mtab]').forEach((btn) => {
+      btn.onclick = () => setMemberTab(btn.dataset.mtab);
+    });
+    document.querySelectorAll('.mp-game-tab').forEach((btn) => {
+      btn.onclick = () => setGameSubTab(btn.dataset.game);
+    });
     const form = document.getElementById('sugForm');
-    const ta = form.querySelector('textarea');
-    ta.oninput = () => { document.getElementById('sugCount').textContent = `${ta.value.length} / 2000`; };
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      const btn = form.querySelector('button[type=submit]');
-      btn.disabled = true;
-      try {
-        await api('/api/my/suggestions', {
-          method: 'POST',
-          body: { type: fd.get('type'), content: fd.get('content') },
-        });
-        e.target.reset();
-        ta.oninput();
-        toast('✓ 已送达管理员');
-        loadMySuggestions();
-      } catch (ex) {
-        toast(ex.message);
-      } finally { btn.disabled = false; }
-    };
+    if (form) {
+      const ta = form.querySelector('textarea');
+      ta.oninput = () => { document.getElementById('sugCount').textContent = `${ta.value.length} / 2000`; };
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const btn = form.querySelector('button[type=submit]');
+        btn.disabled = true;
+        try {
+          await api('/api/my/suggestions', {
+            method: 'POST',
+            body: { type: fd.get('type'), content: fd.get('content') },
+          });
+          e.target.reset();
+          ta.oninput();
+          toast('✓ 已送达管理员');
+          loadMySuggestions();
+        } catch (ex) {
+          toast(ex.message);
+        } finally { btn.disabled = false; }
+      };
+    }
     setupTilt(document.getElementById('cardStage'));
     loadMyCard();
-    loadMySuggestions();
-    loadMyInvite();
     loadAnnouncements();
-    loadMyAchievements();
-    loadJumpGame();
     const readAllBtn = document.getElementById('announceReadAll');
     if (readAllBtn) readAllBtn.onclick = async () => {
       try {
@@ -548,9 +592,68 @@
         loadAnnouncements();
       } catch (ex) { toast(ex.message); }
     };
-    if (window.ChatUI) {
-      state.chatCtrl = ChatUI.bind(document.getElementById('chatPanel') || app, api, toast, { admin: false });
-      state.chatCtrl.markOpen();
+    activateMemberTab(tab, { initial: true });
+  }
+
+  function setMemberTab(tab) {
+    if (!tab || tab === state.memberTab) {
+      // still ensure pane visible if re-clicked
+    }
+    state.memberTab = tab || 'home';
+    history.replaceState(null, '', state.memberTab === 'games' ? '/games' : '/member');
+    document.querySelectorAll('[data-mtab]').forEach((el) => {
+      el.classList.toggle('active', el.dataset.mtab === state.memberTab);
+    });
+    document.querySelectorAll('.mp-pane').forEach((pane) => {
+      pane.classList.toggle('hidden', pane.dataset.pane !== state.memberTab);
+    });
+    activateMemberTab(state.memberTab, { initial: false });
+  }
+
+  function setGameSubTab(which) {
+    const jump = document.getElementById('gameJumpBlock');
+    const goose = document.getElementById('gameGooseBlock');
+    if (!jump || !goose) return;
+    const isGoose = which === 'goose';
+    jump.classList.toggle('hidden', isGoose);
+    goose.classList.toggle('hidden', !isGoose);
+    document.querySelectorAll('.mp-game-tab').forEach((b) => {
+      const on = b.dataset.game === which;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    if (isGoose) loadGooseGame();
+    else loadJumpGame();
+  }
+
+  function activateMemberTab(tab, { initial } = {}) {
+    if (tab === 'home') {
+      // card/announce already loading on render
+    }
+    if (tab === 'chat') {
+      if (window.ChatUI) {
+        const panel = document.getElementById('chatPanel') || document.getElementById('paneChat');
+        if (!state.chatCtrl || initial) {
+          state.chatCtrl = ChatUI.bind(panel || app, api, toast, { admin: false });
+        }
+        state.chatCtrl.markOpen();
+      }
+    }
+    if (tab === 'games') {
+      const gooseHidden = document.getElementById('gameGooseBlock')?.classList.contains('hidden');
+      if (gooseHidden === false) loadGooseGame();
+      else loadJumpGame();
+    } else {
+      // leave games: destroy canvases to free CPU
+      const jr = document.getElementById('jumpGameRoot');
+      if (jr && jr._jg) { try { jr._jg.destroy(); } catch (_) {} }
+      const gr = document.getElementById('gooseGameRoot');
+      if (gr && window.GooseGame) { try { GooseGame.unmount(gr); } catch (_) {} }
+    }
+    if (tab === 'me') {
+      loadMySuggestions();
+      loadMyInvite();
+      loadMyAchievements();
     }
   }
 
@@ -888,6 +991,73 @@
   }
 
   // ---------- Admin ----------
+
+  async function loadGooseGame() {
+    const root = document.getElementById('gooseGameRoot');
+    const chip = document.getElementById('gooseBestChip');
+    if (!root || !window.GooseGame) return;
+    let clears = 0, bestMs = null;
+    try {
+      const me = await api('/api/goose/me');
+      clears = Number(me.clears || 0);
+      bestMs = me.bestMs;
+      if (chip) {
+        chip.textContent = clears
+          ? ('通关 ' + clears + (bestMs != null ? ' · 最快 ' + Math.round(bestMs / 1000) + 's' : ''))
+          : '通关 0';
+      }
+    } catch (_) {}
+    if (root._goose) { try { root._goose.destroy(); } catch (_) {} }
+    GooseGame.mount(root, {
+      bestClears: clears,
+      bestMs,
+      onGameOver: async ({ won, seed, moves, cleared, durationMs, pickSeq }) => {
+        try {
+          const r = await api('/api/goose/score', {
+            method: 'POST',
+            body: { won, seed, moves, cleared, durationMs, pickSeq },
+          });
+          if (chip) {
+            chip.textContent = r.clears
+              ? ('通关 ' + r.clears + (r.bestMs != null ? ' · 最快 ' + Math.round(r.bestMs / 1000) + 's' : ''))
+              : '通关 0';
+          }
+          if (won && r.ok) toast(r.isNewBest ? '🦢 通关！新最快纪录' : '🦢 通关成功');
+          else if (!won) toast('再试一局吧');
+          if (r.newBadges && r.newBadges.length) {
+            r.newBadges.forEach((b) => toast('🏅 解锁成就：' + b.name));
+            loadMyAchievements();
+          }
+          loadGooseBoard();
+        } catch (ex) {
+          toast(ex.message || '成绩提交失败');
+        }
+      },
+    });
+    loadGooseBoard();
+  }
+
+  async function loadGooseBoard() {
+    const board = document.getElementById('gooseBoard');
+    if (!board) return;
+    try {
+      const r = await api('/api/goose/leaderboard?limit=20');
+      const list = r.leaderboard || [];
+      if (!list.length) {
+        board.innerHTML = `<div class="mp-empty"><div class="mp-empty-ico">🦢</div><div>暂无通关成绩</div><p class="mp-fine">通关一局后会出现在这里</p></div>`;
+        return;
+      }
+      board.innerHTML = `<ol class="jg-board">${list.map((row) => `
+        <li class="${row.me ? 'me' : ''}">
+          <span class="jg-rank">${row.rank}</span>
+          <span class="jg-alias">${escapeHtml(row.alias)}${row.me ? ' · 我' : ''}</span>
+          <span class="jg-pts">${row.clears}关${row.bestMs != null ? ' · ' + Math.round(row.bestMs / 1000) + 's' : ''}</span>
+        </li>`).join('')}</ol>`;
+    } catch (ex) {
+      board.innerHTML = `<div class="empty">${escapeHtml(ex.message)}</div>`;
+    }
+  }
+
   function renderAdmin() {
     history.replaceState(null, '', '/admin');
     app.innerHTML = `
@@ -909,6 +1079,7 @@
           <button class="tab" data-tab="invites">邀请码</button>
           <button class="tab" data-tab="announcements">公告栏</button>
           <button class="tab" data-tab="jump">跳一跳</button>
+          <button class="tab" data-tab="goose">抓大鹅</button>
           <button class="tab" data-tab="chat">匿名聊天</button>
           <button class="tab" data-tab="security">安全中心</button>
         </div>
@@ -939,6 +1110,7 @@
       invites: renderInvitesTab,
       announcements: renderAnnouncementsTab,
       jump: renderJumpAdminTab,
+      goose: renderGooseAdminTab,
       chat: renderChatTab,
       security: renderSecurityTab,
     };
@@ -1323,6 +1495,63 @@
         });
       }
       wireJumpMultiEntry();
+    } catch (ex) {
+      body.innerHTML = `<div class="panel"><div class="empty">${escapeHtml(ex.message)}</div></div>`;
+    }
+  }
+
+
+  async function renderGooseAdminTab() {
+    const body = document.getElementById('tabBody');
+    if (!body) return;
+    body.innerHTML = `<div class="panel"><div class="empty">加载中…</div></div>`;
+    try {
+      const [me, board] = await Promise.all([
+        api('/api/goose/me'),
+        api('/api/goose/leaderboard?limit=30'),
+      ]);
+      body.innerHTML = `
+        <div class="panel">
+          <h2>抓大鹅 · 管理端</h2>
+          <p class="muted-sm">三消堆叠。排行榜对你显示真实姓名；成员端仅见匿名代号。</p>
+          <div class="mp-chip gold" style="display:inline-block;margin:8px 0">通关 ${Number(me.clears || 0)} · 已玩 ${Number(me.gamesPlayed || 0)} 局${me.bestMs != null ? ' · 最快 ' + Math.round(me.bestMs / 1000) + 's' : ''}</div>
+          <div id="gooseGameRoot" class="gg-root"></div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h2>通关榜（含身份）</h2>
+          <div id="gooseBoardAdmin"></div>
+        </div>`;
+      const list = board.leaderboard || [];
+      const box = document.getElementById('gooseBoardAdmin');
+      box.innerHTML = list.length
+        ? `<div style="overflow-x:auto"><table><thead><tr><th>#</th><th>代号</th><th>成员</th><th>通关</th><th>最快</th><th>局数</th></tr></thead><tbody>
+            ${list.map((row) => `<tr>
+              <td>${row.rank}</td>
+              <td>${escapeHtml(row.alias)}</td>
+              <td>${escapeHtml(row.displayName || row.username || '—')}<div class="muted-sm">@${escapeHtml(row.username || '')}</div></td>
+              <td><strong>${row.clears}</strong></td>
+              <td>${row.bestMs != null ? Math.round(row.bestMs / 1000) + 's' : '—'}</td>
+              <td>${row.gamesPlayed || 0}</td>
+            </tr>`).join('')}
+          </tbody></table></div>`
+        : '<div class="empty">暂无成绩</div>';
+      const root = document.getElementById('gooseGameRoot');
+      if (window.GooseGame && root) {
+        GooseGame.mount(root, {
+          bestClears: me.clears || 0,
+          bestMs: me.bestMs,
+          onGameOver: async ({ won, seed, moves, cleared, durationMs, pickSeq }) => {
+            try {
+              const r = await api('/api/goose/score', {
+                method: 'POST',
+                body: { won, seed, moves, cleared, durationMs, pickSeq },
+              });
+              toast(won ? (r.isNewBest ? '🦢 通关 · 新纪录' : '🦢 通关') : '未通关');
+              renderGooseAdminTab();
+            } catch (ex) { toast(ex.message); }
+          },
+        });
+      }
     } catch (ex) {
       body.innerHTML = `<div class="panel"><div class="empty">${escapeHtml(ex.message)}</div></div>`;
     }

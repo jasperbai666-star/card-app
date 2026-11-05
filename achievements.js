@@ -59,6 +59,18 @@ const BADGES = [
     description: '跳一跳单局得分达到 50 分。',
     icon: '🏆',
   },
+  {
+    key: 'goose_newbie',
+    name: '抓鹅新手',
+    description: '成功通关至少一局抓大鹅。',
+    icon: '🦢',
+  },
+  {
+    key: 'goose_pro',
+    name: '抓鹅达人',
+    description: '累计通关抓大鹅 3 局。',
+    icon: '🥇',
+  },
 ];
 
 const BADGE_MAP = Object.fromEntries(BADGES.map((b) => [b.key, b]));
@@ -66,6 +78,7 @@ const BADGE_MAP = Object.fromEntries(BADGES.map((b) => [b.key, b]));
 /** Q=12 and above count as 高阶牌面. */
 const HIGH_CARD_LEVEL = 12;
 const JUMP_PRO_SCORE = 50;
+const GOOSE_PRO_CLEARS = 3;
 
 function publicBadge(def, unlockedAt = null) {
   return {
@@ -192,6 +205,12 @@ async function backfillAll(db) {
       if (js && Number(js.best_score || 0) >= JUMP_PRO_SCORE) keys.push('jump_pro');
     } catch (_) { /* table may not exist yet during first migrate */ }
 
+    try {
+      const gs = await db.get('SELECT clears FROM goose_scores WHERE user_id = ?', m.id);
+      if (gs && Number(gs.clears || 0) >= 1) keys.push('goose_newbie');
+      if (gs && Number(gs.clears || 0) >= GOOSE_PRO_CLEARS) keys.push('goose_pro');
+    } catch (_) {}
+
     const neu = await award(db, m.id, keys);
     awarded += neu.length;
   }
@@ -203,6 +222,7 @@ module.exports = {
   BADGE_MAP,
   HIGH_CARD_LEVEL,
   JUMP_PRO_SCORE,
+  GOOSE_PRO_CLEARS,
   publicBadge,
   award,
   listForUser,

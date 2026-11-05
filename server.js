@@ -28,6 +28,7 @@ const { ensureAdmin } = require('./scripts/setup-admin.js');
 const chat = require('./chat');
 const achievements = require('./achievements');
 const jumpRooms = require('./jump-rooms');
+const gooseLogic = require('./goose-logic');
 
 const app = express();
 const server = http.createServer(app);
@@ -133,6 +134,7 @@ app.get('/healthz', ah(async (_req, res) => {
     await db.all('SELECT id FROM announcements ORDER BY id DESC LIMIT 1');
     await db.all('SELECT badge_key FROM user_achievements LIMIT 1');
     await db.all('SELECT user_id FROM jump_scores LIMIT 1');
+    await db.all('SELECT user_id FROM goose_scores LIMIT 1');
   } catch (e) {
     return res.status(500).json({ ok: false, error: 'schema', detail: String(e.message || e).slice(0, 120) });
   }
@@ -531,6 +533,11 @@ const jumpRoomLimiter = rateLimit({
   windowMs: 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false,
   keyGenerator: (req) => 'jrm' + (req.session?.userId || 'anon'),
   handler: limitJson('房间操作太频繁，请稍后再试'),
+});
+const gooseScoreLimiter = rateLimit({
+  windowMs: 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false,
+  keyGenerator: (req) => 'goose' + (req.session?.userId || 'anon'),
+  handler: limitJson('提交太频繁，请稍后再试'),
 });
 const sensitiveLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false,
@@ -1200,6 +1207,7 @@ app.delete('/api/admin/members/:id', requireAdmin, ah(async (req, res) => {
     await tx.run(`DELETE FROM announcement_reads WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM jump_scores WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM jump_room_players WHERE user_id = ?`, id);
+    await tx.run(`DELETE FROM goose_scores WHERE user_id = ?`, id);
     // Codes the member used: detach and mark revoked so they can never be re-used.
     await tx.run(`UPDATE invite_codes SET used_by = NULL, used_at = NULL, revoked = 1 WHERE used_by = ?`, id);
     // Codes the member issued: revoke unused ones and detach creator. Members they invited keep
@@ -1675,6 +1683,137 @@ app.post('/api/jump/score', requireAuth, jumpScoreLimiter, ah(async (req, res) =
 }));
 
 
+
+// ---------- 抓大鹅 ----------
+app.get('/api/goose/me', requireAuth, ah(async (req, res) => {
+  const row = await db.get('SELECT * FROM goose_scores WHERE user_id = ?', req.user.id);
+  res.json({
+    clears: row ? Number(row.clears) : 0,
+    bestMs: row && row.best_ms != null ? Number(row.best_ms) : null,
+    gamesPlayed: row ? Number(row.games_played) : 0,
+    alias: row?.alias || jumpAliasFor(req),
+    proClears: achievements.GOOSE_PRO_CLEARS,
+  });
+}));
+
+app.get('/api/goose/leaderboard', requireAuth, ah(async (req, res) => {
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+  const rows = await db.all(
+    `SELECT g.user_id, g.clears, g.best_ms, g.alias, g.best_at, g.games_played,
+            u.username, u.display_name, u.role
+     FROM goose_scores g
+     JOIN users u ON u.id = g.user_id
+     WHERE g.clears > 0 AND u.disabled = 0
+     ORDER BY g.clears DESC, CASE WHEN g.best_ms IS NULL THEN 1 ELSE 0 END, g.best_ms ASC, g.best_at ASC
+     LIMIT ?`,
+    limit
+  );
+  // SQLite may not like NULLS LAST — fallback query if needed handled below
+  const isAdmin = req.user.role === 'admin';
+  res.json({
+    leaderboard: rows.map((r, i) => ({
+      rank: i + 1,
+      clears: Number(r.clears),
+      bestMs: r.best_ms != null ? Number(r.best_ms) : null,
+      alias: r.role === 'admin' ? '管理员' : (r.alias || '匿名玩家'),
+      bestAt: r.best_at,
+      gamesPlayed: Number(r.games_played || 0),
+      ...(isAdmin ? {
+        userId: r.user_id,
+        username: r.username,
+        displayName: r.display_name || r.username,
+        role: r.role,
+      } : {}),
+      me: r.user_id === req.user.id,
+    })),
+  });
+}));
+
+app.post('/api/goose/score', requireAuth, gooseScoreLimiter, ah(async (req, res) => {
+  const won = !!req.body?.won;
+  const seed = Number(req.body?.seed);
+  const durationMs = Number(req.body?.durationMs);
+  const moves = Number(req.body?.moves);
+  const pickSeq = req.body?.pickSeq;
+  if (!won) {
+    // still count a played game lightly without awarding clear
+    const alias = jumpAliasFor(req);
+    const prev = await db.get('SELECT * FROM goose_scores WHERE user_id = ?', req.user.id);
+    if (!prev) {
+      await db.run(
+        `INSERT INTO goose_scores (user_id, clears, best_ms, games_played, alias, updated_at)
+         VALUES (?, 0, NULL, 1, ?, ${NOW})`,
+        req.user.id, alias
+      );
+    } else {
+      await db.run(
+        `UPDATE goose_scores SET games_played = games_played + 1, alias = ?, updated_at = ${NOW} WHERE user_id = ?`,
+        alias, req.user.id
+      );
+    }
+    const row = await db.get('SELECT * FROM goose_scores WHERE user_id = ?', req.user.id);
+    return res.json({
+      ok: true, won: false,
+      clears: Number(row.clears), bestMs: row.best_ms != null ? Number(row.best_ms) : null,
+      gamesPlayed: Number(row.games_played), newBadges: [],
+    });
+  }
+  if (!Number.isFinite(seed) || !Number.isFinite(durationMs) || durationMs < 3000 || durationMs > 30 * 60 * 1000) {
+    return res.status(400).json({ error: '用时不合理' });
+  }
+  if (!Number.isFinite(moves) || moves < 9 || moves > 400) {
+    return res.status(400).json({ error: '步数不合理' });
+  }
+  const v = gooseLogic.validateClear(seed, pickSeq, { triples: 12, typeCount: 6, layers: 4, cols: 6, rows: 6 });
+  if (!v.ok) return res.status(400).json({ error: v.error || '通关校验失败' });
+  // duration vs moves floor ~ 200ms/move
+  if (durationMs < moves * 180) return res.status(400).json({ error: '用时过短，成绩未采纳' });
+
+  const alias = jumpAliasFor(req);
+  const prev = await db.get('SELECT * FROM goose_scores WHERE user_id = ?', req.user.id);
+  let clears = 1;
+  let bestMs = Math.floor(durationMs);
+  let isNewBest = true;
+  if (!prev) {
+    await db.run(
+      `INSERT INTO goose_scores (user_id, clears, best_ms, games_played, alias, best_at, updated_at)
+       VALUES (?, 1, ?, 1, ?, ${NOW}, ${NOW})`,
+      req.user.id, bestMs, alias
+    );
+  } else {
+    clears = Number(prev.clears) + 1;
+    const prevBest = prev.best_ms != null ? Number(prev.best_ms) : null;
+    isNewBest = prevBest == null || bestMs < prevBest;
+    bestMs = isNewBest ? bestMs : prevBest;
+    if (isNewBest) {
+      await db.run(
+        `UPDATE goose_scores SET clears = ?, best_ms = ?, games_played = games_played + 1, alias = ?, best_at = ${NOW}, updated_at = ${NOW}
+         WHERE user_id = ?`,
+        clears, bestMs, alias, req.user.id
+      );
+    } else {
+      await db.run(
+        `UPDATE goose_scores SET clears = ?, games_played = games_played + 1, alias = ?, updated_at = ${NOW}
+         WHERE user_id = ?`,
+        clears, alias, req.user.id
+      );
+    }
+  }
+  const keys = ['goose_newbie'];
+  if (clears >= achievements.GOOSE_PRO_CLEARS) keys.push('goose_pro');
+  const newly = await notifyAchievements(req.user.id, keys);
+  const row = await db.get('SELECT * FROM goose_scores WHERE user_id = ?', req.user.id);
+  res.json({
+    ok: true,
+    won: true,
+    clears: Number(row.clears),
+    bestMs: row.best_ms != null ? Number(row.best_ms) : null,
+    gamesPlayed: Number(row.games_played),
+    isNewBest,
+    newBadges: newly,
+  });
+}));
+
 // ---------- Jump rooms (multiplayer) ----------
 function jumpPublicBase(req) {
   const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
@@ -1793,7 +1932,7 @@ app.get('/api/jump/rooms/:code/share', requireAuth, ah(async (req, res) => {
 }));
 
 // SPA fallback for clean URLs
-app.get(['/', '/login', '/register', '/admin', '/member', '/settings', '/jump', '/jump/r/:code'], (_req, res) => {
+app.get(['/', '/login', '/register', '/admin', '/member', '/settings', '/jump', '/jump/r/:code', '/games'], (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
