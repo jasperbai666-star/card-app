@@ -173,6 +173,22 @@ const NEW_COLUMNS = [
   ['invite_codes', 'expires_at', 'TEXT'],
   ['invite_codes', 'note', 'TEXT'],
   ['login_audit', 'detail', 'TEXT'],
+  ['users', 'invited_by', 'INTEGER'],
+  // 1 = member-issued code, subject to the "one active code per member" rule
+  ['invite_codes', 'member_limited', 'INTEGER NOT NULL DEFAULT 0'],
+];
+
+/** Post-column migrations (idempotent; same SQL works on SQLite and Postgres). */
+const POST_MIGRATIONS = [
+  // Race-safe guard: at most one active (unused, unrevoked) member-issued code per creator.
+  `CREATE UNIQUE INDEX IF NOT EXISTS uniq_member_active_invite ON invite_codes(created_by)
+     WHERE member_limited = 1 AND used_by IS NULL AND revoked = 0`,
+  // Backfill inviter for existing members from the invite-code records (only fills NULLs).
+  `UPDATE users SET invited_by = (
+       SELECT i.created_by FROM invite_codes i
+       WHERE i.used_by = users.id OR (users.invite_code_used IS NOT NULL AND i.code = users.invite_code_used)
+       ORDER BY i.id LIMIT 1)
+     WHERE invited_by IS NULL AND role = 'member'`,
 ];
 
 function toPg(sql) {
@@ -210,6 +226,7 @@ if (isPg) {
       for (const [t, c, type] of NEW_COLUMNS) {
         await pool.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS ${c} ${type}`);
       }
+      for (const m of POST_MIGRATIONS) await pool.query(m);
     },
     async transaction(fn) {
       const client = await pool.connect();
@@ -251,6 +268,7 @@ if (isPg) {
         const cols = sdb.prepare(`PRAGMA table_info(${t})`).all().map((r) => r.name);
         if (!cols.includes(c)) sdb.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${type}`);
       }
+      for (const m of POST_MIGRATIONS) sdb.exec(m);
     },
     // serialize transactions so concurrent async callers don't interleave
     transaction(fn) {

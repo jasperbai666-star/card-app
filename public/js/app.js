@@ -65,15 +65,18 @@
       } else if (msg.type === 'profile_updated') {
         if (msg.user && state.user && msg.user.id === state.user.id) {
           state.user = { ...state.user, displayName: msg.user.displayName };
+          if (state.user.role === 'member') loadMyInvite();
           document.querySelectorAll('.who-name').forEach((el) => { el.textContent = msg.user.displayName; });
           toast('管理员已把你的姓名改为「' + msg.user.displayName + '」');
         }
+      } else if (msg.type === 'invite_used') {
+        if (state.user?.role === 'member') { toast('「' + msg.displayName + '」已用你的邀请码加入'); loadMyInvite(); }
       } else if (msg.type === 'force_logout') {
         toast(msg.reason || '已被强制下线');
         logout();
       } else if (msg.type === 'new_suggestion' || msg.type === 'member_joined' ||
                  msg.type === 'member_card_updated' || msg.type === 'member_removed' || msg.type === 'member_updated' ||
-                 msg.type === 'suggestion_updated') {
+                 msg.type === 'suggestion_updated' || msg.type === 'invites_changed') {
         if (state.user?.role === 'admin') {
           // don't wipe an inline name edit in progress; refresh once it closes
           if (state.editingName) state.pendingRefresh = true; else refreshAdminTab();
@@ -381,6 +384,12 @@
         <div class="panel member-hero">
           <div id="myCard"></div>
           <p class="hint">仅你可见 · 管理员变更后将实时刷新</p>
+          <p class="hint" id="myInviter">邀请人：…</p>
+        </div>
+        <div class="panel">
+          <h2>我的邀请码</h2>
+          <p class="hint">每人同时只能有 <strong>1 个</strong>有效邀请码（7 天有效）。它被使用、过期或你主动撤销后，才能再生成新的。</p>
+          <div id="myInvite"><div class="empty">加载中…</div></div>
         </div>
         <div class="grid-2">
           <div class="panel">
@@ -422,6 +431,42 @@
     };
     loadMyCard();
     loadMySuggestions();
+    loadMyInvite();
+  }
+
+  async function loadMyInvite() {
+    const box = document.getElementById('myInvite');
+    const who = document.getElementById('myInviter');
+    if (!box) return;
+    try {
+      const r = await api('/api/my/invite');
+      if (who) who.textContent = '邀请人：' + (r.invitedBy ? r.invitedBy.name : '未知');
+      const inv = r.invite && r.invite.status === 'unused' ? r.invite : null;
+      const list = r.invitedMembers.length
+        ? `<p class="hint">我邀请的成员：${r.invitedMembers.map((m) => escapeHtml(m.displayName)).join('、')}</p>` : '';
+      box.innerHTML = inv
+        ? `<div class="form-inline"><span class="mono" style="font-size:1.3rem;letter-spacing:2px">${escapeHtml(inv.code)}</span>
+             <span class="muted-sm">有效期至 ${formatTime(inv.expiresAt)}</span>
+             <button class="btn btn-ghost btn-sm" id="copyInv">复制</button>
+             <button class="btn btn-danger btn-sm" id="revokeInv">撤销</button></div>
+           <p class="hint">当前已有 1 个未使用的邀请码，需等它被使用或撤销后才能生成新的。</p>${list}`
+        : `<button class="btn btn-primary btn-sm" id="genInv">生成邀请码</button>${list}`;
+      const g = document.getElementById('genInv');
+      if (g) g.onclick = async () => {
+        try { await api('/api/my/invite', { method: 'POST', body: {} }); toast('已生成邀请码'); } catch (ex) { toast(ex.message); }
+        loadMyInvite();
+      };
+      const rv = document.getElementById('revokeInv');
+      if (rv) rv.onclick = async () => {
+        if (!confirm('确定撤销这个邀请码？撤销后它将无法再使用。')) return;
+        try { await api('/api/my/invite/revoke', { method: 'POST', body: {} }); toast('已撤销'); } catch (ex) { toast(ex.message); }
+        loadMyInvite();
+      };
+      const cp = document.getElementById('copyInv');
+      if (cp) cp.onclick = () => navigator.clipboard?.writeText(inv.code).then(() => toast('已复制'), () => toast(inv.code));
+    } catch (ex) {
+      box.innerHTML = `<div class="empty">${escapeHtml(ex.message)}</div>`;
+    }
   }
 
   async function loadMyCard() {
@@ -534,7 +579,7 @@
           <div style="overflow-x:auto">
             <table>
               <thead>
-                <tr><th>成员</th><th>当前牌</th><th>设置卡牌</th><th>状态</th><th>操作</th></tr>
+                <tr><th>成员</th><th>邀请人</th><th>当前牌</th><th>设置卡牌</th><th>状态</th><th>操作</th></tr>
               </thead>
               <tbody>
                 ${members.map((m) => `
@@ -551,6 +596,7 @@
                       </form>
                       <div style="font-size:.78rem;color:var(--muted)">@${escapeHtml(m.username)}</div>
                     </td>
+                    <td class="inviter-cell">${m.invitedBy ? (m.invitedBy.role === 'admin' ? '<span class="badge badge-handled">管理员</span>' : escapeHtml(m.invitedBy.name)) : '未知'}</td>
                     <td>${CardsUI.mini(m.card)}</td>
                     <td>
                       <div class="form-inline">
@@ -573,7 +619,7 @@
                       <button class="btn btn-danger btn-sm del-mem">删除</button>
                     </td>
                   </tr>
-                `).join('') || '<tr><td colspan="5" class="empty">暂无成员，请先生成邀请码</td></tr>'}
+                `).join('') || '<tr><td colspan="6" class="empty">暂无成员，请先生成邀请码</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -785,11 +831,12 @@
             <button class="btn btn-ghost btn-sm" id="gen5">生成 5 个</button>
           </div>
           <div style="overflow-x:auto"><table>
-            <thead><tr><th>邀请码</th><th>备注</th><th>状态</th><th>使用者</th><th>有效期至</th><th>操作</th></tr></thead>
+            <thead><tr><th>邀请码</th><th>生成人</th><th>备注</th><th>状态</th><th>使用者</th><th>有效期至</th><th>操作</th></tr></thead>
             <tbody>
               ${invites.map((i) => `
                 <tr>
                   <td class="mono">${escapeHtml(i.code)}</td>
+                  <td>${escapeHtml(i.createdByName || '未知')}</td>
                   <td>${i.note ? escapeHtml(i.note) : '—'}</td>
                   <td><span class="badge badge-${escapeHtml(i.status)}">${statusLabel(i.status)}</span></td>
                   <td>${i.usedByUsername ? escapeHtml(i.usedByUsername) : '—'}</td>
@@ -798,7 +845,7 @@
                     ${i.status === 'unused' ? `<button class="btn btn-danger btn-sm revoke" data-id="${i.id}">撤销</button>` : '—'}
                   </td>
                 </tr>
-              `).join('') || '<tr><td colspan="6" class="empty">暂无邀请码</td></tr>'}
+              `).join('') || '<tr><td colspan="7" class="empty">暂无邀请码</td></tr>'}
             </tbody>
           </table></div>
         </div>
@@ -837,7 +884,7 @@
     ok: '登录成功', ok_2fa: '登录成功（2FA）', register: '注册', bad_password: '密码错误', no_user: '账号不存在',
     bad_totp: '验证码错误', locked: '已锁定', disabled: '账号停用', pw_changed: '修改密码',
     pw_change_bad_current: '改密失败', '2fa_enabled': '开启2FA', '2fa_disabled': '关闭2FA',
-    '2fa_reset_by_admin': '管理员重置2FA', forced_logout_by_admin: '被强制下线', unlocked_by_admin: '管理员解锁', display_name_changed: '修改姓名', logout_others: '退出其他设备',
+    '2fa_reset_by_admin': '管理员重置2FA', forced_logout_by_admin: '被强制下线', unlocked_by_admin: '管理员解锁', display_name_changed: '修改姓名', member_invite_created: '成员生成邀请码', member_invite_revoked: '成员撤销邀请码', logout_others: '退出其他设备',
   };
 
   async function renderSecurityTab() {

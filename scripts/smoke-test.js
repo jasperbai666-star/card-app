@@ -112,6 +112,49 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
   r = await api(mB, 'POST', '/api/register', { username: ub, password: PW, inviteCode: codeB });
   const idB = r.data.user?.id; if (idB) created.members.push(idB);
   check('member B registers', r.status === 200 && idB);
+
+  // --- member invites: ONE active code per member, inviter tracking ---
+  r = await api(mA, 'GET', '/api/my/invite');
+  check('member A invitedBy = 管理员 (admin code)', r.status === 200 && r.data.invitedBy?.name === '管理员' && r.data.invite === null, JSON.stringify(r.data));
+  const race = await Promise.all([1, 2, 3].map(() => api(mA, 'POST', '/api/my/invite', {})));
+  const okRace = race.filter((x) => x.status === 200);
+  check('concurrent member invite creation: exactly one succeeds, others 409',
+    okRace.length === 1 && race.filter((x) => x.status === 409).length === 2, race.map((x) => x.status).join(','));
+  const codeM1 = okRace[0]?.data.invite?.code; created.codes.push(codeM1);
+  r = await api(mA, 'POST', '/api/my/invite', {});
+  check('member cannot create a 2nd code while one is active (409, Chinese msg)', r.status === 409 && /只能有 1 个/.test(r.data.error || ''));
+  r = await api(mA, 'POST', '/api/my/invite/revoke', {});
+  check('member can revoke own active code', r.status === 200);
+  r = await api(mA, 'POST', '/api/my/invite/revoke', {});
+  check('revoking again -> 404', r.status === 404);
+  r = await api({}, 'POST', '/api/register', { username: 'tr_' + sfx, password: PW, inviteCode: codeM1 });
+  check('revoked member code cannot register', r.status === 400);
+  r = await api(mA, 'POST', '/api/my/invite', {});
+  const codeM2 = r.data.invite?.code; created.codes.push(codeM2);
+  check('after revoke member can create a new code', r.status === 200 && codeM2 && codeM2 !== codeM1);
+  r = await api(mB, 'POST', '/api/admin/invites', { count: 1 });
+  check('member cannot use admin invite API', r.status === 403 || r.status === 401);
+  const mC = {};
+  r = await api(mC, 'POST', '/api/register', { username: 'td_' + sfx, password: PW, inviteCode: codeM2 });
+  const idC = r.data.user?.id; if (idC) created.members.push(idC);
+  check('member C registers with A\'s code', r.status === 200 && idC);
+  r = await api(mA, 'GET', '/api/my/invite');
+  check('A: code consumed, C listed as invited, can create again', r.data.invite === null && r.data.invitedMembers?.some((x) => x.id === idC));
+  r = await api(mA, 'POST', '/api/my/invite', {});
+  if (r.data.invite?.code) created.codes.push(r.data.invite.code);
+  check('A can create a new code after the previous one was used', r.status === 200);
+  await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: '邀请人' + sfx });
+  r = await api(mC, 'GET', '/api/my/invite');
+  check('C profile shows inviter = A\'s CURRENT (renamed) name', r.data.invitedBy?.name === '邀请人' + sfx && r.data.invitedBy?.id === idA, JSON.stringify(r.data.invitedBy));
+  r = await api(admin, 'GET', '/api/admin/members');
+  const mm = r.data.members || [];
+  check('admin member list: inviter column (A=管理员, C=A current name)',
+    mm.find((x) => x.id === idA)?.invitedBy?.name === '管理员' && mm.find((x) => x.id === idC)?.invitedBy?.name === '邀请人' + sfx);
+  check('admin member list: every member has an inviter field', mm.every((x) => x.invitedBy && x.invitedBy.name));
+  r = await api(admin, 'GET', '/api/admin/invites');
+  check('admin invites list shows creator name', (r.data.invites || []).some((x) => x.code === codeM2 && x.createdByName === '邀请人' + sfx));
+  await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: XSS_NAME });
+
   check('admin WS got member_joined', await waitFor(adminWs.msgs, (m) => m.type === 'member_joined'));
 
   // --- cards / isolation / live updates ---
@@ -270,7 +313,7 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
 
   // --- cleanup ---
   if (!process.env.KEEP_TEST_DATA) {
-    for (const id of created.members) await api(admin, 'DELETE', `/api/admin/members/${id}`);
+    for (const id of created.members) { const d = await api(admin, "DELETE", `/api/admin/members/${id}`); if (d.status !== 200) console.log("delete member", id, d.status, JSON.stringify(d.data)); }
     const all = (await api(admin, 'GET', '/api/admin/invites')).data.invites || [];
     for (const i of all) if (created.codes.includes(i.code)) await api(admin, 'DELETE', `/api/admin/invites/${i.id}`);
     const m = await api(admin, 'GET', '/api/admin/members');

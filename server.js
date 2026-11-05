@@ -269,6 +269,20 @@ function sanitizeUser(u, { includeCard = true } = {}) {
   return base;
 }
 
+/** Inviter shown in the UI; uses the inviter's CURRENT name (joined live, never copied). */
+function inviterOf(row) {
+  if (row.invited_by === null || row.invited_by === undefined) return { id: null, name: '未知', role: null };
+  if (!row.inviter_role) return { id: row.invited_by, name: '已删除成员', role: null };
+  if (row.inviter_role === 'admin') return { id: row.invited_by, name: '管理员', role: 'admin' };
+  return { id: row.invited_by, name: row.inviter_display_name || row.inviter_username, role: 'member' };
+}
+const INVITER_JOIN = `LEFT JOIN users iv ON iv.id = u.invited_by`;
+const INVITER_COLS = `iv.role AS inviter_role, iv.display_name AS inviter_display_name, iv.username AS inviter_username`;
+
+function inviteStatus(r) {
+  return r.revoked ? 'revoked' : r.used_by ? 'used' : r.expires_at && r.expires_at <= sec.nowText() ? 'expired' : 'unused';
+}
+
 function regenerateSession(req) {
   return new Promise((resolve, reject) => req.session.regenerate((e) => (e ? reject(e) : resolve())));
 }
@@ -415,12 +429,13 @@ app.post('/api/register', registerLimiter, ah(async (req, res) => {
   try {
     userId = await db.transaction(async (tx) => {
       const info = await tx.run(
-        `INSERT INTO users (username, password_hash, role, display_name, invite_code_used)
-         VALUES (?, ?, 'member', ?, ?)`,
+        `INSERT INTO users (username, password_hash, role, display_name, invite_code_used, invited_by)
+         VALUES (?, ?, 'member', ?, ?, ?)`,
         uname,
         pwHash,
         dispName,
-        code
+        code,
+        invite.created_by ?? null
       );
       const upd = await tx.run(
         `UPDATE invite_codes SET used_by = ?, used_at = ${NOW} WHERE id = ? AND used_by IS NULL AND revoked = 0`,
@@ -438,6 +453,7 @@ app.post('/api/register', registerLimiter, ah(async (req, res) => {
   await establishSession(req, user);
   await sec.audit(req, { username: uname, userId: user.id, success: true, reason: 'register' });
   broadcastAdmins({ type: 'member_joined', user: sanitizeUser(user) });
+  if (invite.created_by) sendToUser(invite.created_by, { type: 'invite_used', displayName: user.display_name || user.username });
   res.json({ user: sanitizeUser(user), wsToken: await issueWsToken(user.id) });
 }));
 
@@ -558,10 +574,80 @@ function fmtSession(r) {
   };
 }
 
+// ---------- Member: own invite code (max ONE active at a time) + who invited me ----------
+const MEMBER_INVITE_DAYS = 7;
+async function myActiveInvite(userId, q = db) {
+  return q.get(
+    `SELECT * FROM invite_codes WHERE created_by = ? AND member_limited = 1 AND used_by IS NULL AND revoked = 0 ORDER BY id DESC LIMIT 1`,
+    userId
+  );
+}
+function fmtMyInvite(r) {
+  return r ? { id: r.id, code: r.code, createdAt: r.created_at, expiresAt: r.expires_at, status: inviteStatus(r) } : null;
+}
+
+app.get('/api/my/invite', requireAuth, ah(async (req, res) => {
+  const me = await db.get(`SELECT u.*, ${INVITER_COLS} FROM users u ${INVITER_JOIN} WHERE u.id = ?`, req.user.id);
+  const active = req.user.role === 'member' ? await myActiveInvite(req.user.id) : null;
+  const invited = await db.all(
+    `SELECT id, username, display_name, created_at FROM users WHERE invited_by = ? AND role = 'member' ORDER BY id ASC`,
+    req.user.id
+  );
+  res.json({
+    invitedBy: req.user.role === 'member' ? inviterOf(me) : null,
+    invite: fmtMyInvite(active),
+    invitedMembers: invited.map((u) => ({ id: u.id, displayName: u.display_name || u.username, createdAt: u.created_at })),
+  });
+}));
+
+app.post('/api/my/invite', requireAuth, sensitiveLimiter, ah(async (req, res) => {
+  if (req.user.role !== 'member') return res.status(400).json({ error: '管理员请在「邀请码」页生成' });
+  let created;
+  try {
+    created = await db.transaction(async (tx) => {
+      // An expired-but-unused code no longer counts: retire it so a new one can be issued.
+      await tx.run(
+        `UPDATE invite_codes SET revoked = 1 WHERE created_by = ? AND member_limited = 1 AND used_by IS NULL AND revoked = 0
+         AND expires_at IS NOT NULL AND expires_at <= ?`,
+        req.user.id, sec.nowText()
+      );
+      const existing = await myActiveInvite(req.user.id, tx);
+      if (existing) return { existing };
+      const code = generateInviteCode();
+      // The partial unique index uniq_member_active_invite makes a concurrent second insert fail.
+      await tx.run(
+        `INSERT INTO invite_codes (code, created_by, expires_at, member_limited) VALUES (?, ?, ?, 1)`,
+        code, req.user.id, sec.nowText(MEMBER_INVITE_DAYS * 86400000)
+      );
+      return { row: await myActiveInvite(req.user.id, tx) };
+    });
+  } catch (_) {
+    return res.status(409).json({ error: '你已有一个未使用的邀请码，每人同时只能有 1 个；请等它被使用或先撤销' });
+  }
+  if (created.existing) {
+    return res.status(409).json({ error: '你已有一个未使用的邀请码，每人同时只能有 1 个；请等它被使用或先撤销', invite: fmtMyInvite(created.existing) });
+  }
+  await sec.audit(req, { username: req.user.username, userId: req.user.id, success: true, reason: 'member_invite_created' });
+  broadcastAdmins({ type: 'invites_changed' });
+  res.json({ invite: fmtMyInvite(created.row) });
+}));
+
+app.post('/api/my/invite/revoke', requireAuth, sensitiveLimiter, ah(async (req, res) => {
+  if (req.user.role !== 'member') return res.status(400).json({ error: '管理员请在「邀请码」页撤销' });
+  const r = await db.run(
+    `UPDATE invite_codes SET revoked = 1 WHERE created_by = ? AND member_limited = 1 AND used_by IS NULL AND revoked = 0`,
+    req.user.id
+  );
+  if (!r.changes) return res.status(404).json({ error: '你当前没有可撤销的邀请码' });
+  await sec.audit(req, { username: req.user.username, userId: req.user.id, success: true, reason: 'member_invite_revoked' });
+  broadcastAdmins({ type: 'invites_changed' });
+  res.json({ ok: true });
+}));
+
 // ---------- Admin APIs ----------
 app.get('/api/admin/members', requireAdmin, ah(async (_req, res) => {
-  const rows = await db.all(`SELECT * FROM users WHERE role = 'member' ORDER BY id ASC`);
-  const members = rows.map((u) => ({ ...sanitizeUser(u), level: levelOf(u.card_rank) }));
+  const rows = await db.all(`SELECT u.*, ${INVITER_COLS} FROM users u ${INVITER_JOIN} WHERE u.role = 'member' ORDER BY u.id ASC`);
+  const members = rows.map((u) => ({ ...sanitizeUser(u), invitedBy: inviterOf(u), level: levelOf(u.card_rank) }));
   members.sort((a, b) => (b.level || 0) - (a.level || 0) || a.id - b.id);
   res.json({ members });
 }));
@@ -637,7 +723,10 @@ app.post('/api/admin/members/:id/disable', requireAdmin, ah(async (req, res) => 
   if (!member || member.role !== 'member') return res.status(404).json({ error: '成员不存在' });
   const disabled = req.body && req.body.disabled === false ? 0 : 1;
   await db.run(`UPDATE users SET disabled = ? WHERE id = ?`, disabled, id);
-  if (disabled) await forceLogoutUser(id, '账号已被停用');
+  if (disabled) {
+    await db.run(`UPDATE invite_codes SET revoked = 1 WHERE created_by = ? AND used_by IS NULL AND revoked = 0`, id);
+    await forceLogoutUser(id, '账号已被停用');
+  }
   res.json({ ok: true, disabled: !!disabled });
 }));
 
@@ -650,7 +739,11 @@ app.delete('/api/admin/members/:id', requireAdmin, ah(async (req, res) => {
     await tx.run(`DELETE FROM user_sessions WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM suggestions WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM ws_tokens WHERE user_id = ?`, id);
-    await tx.run(`UPDATE invite_codes SET used_by = NULL, used_at = NULL WHERE used_by = ?`, id);
+    // Codes the member used: detach and mark revoked so they can never be re-used.
+    await tx.run(`UPDATE invite_codes SET used_by = NULL, used_at = NULL, revoked = 1 WHERE used_by = ?`, id);
+    // Codes the member issued: revoke unused ones and detach creator. Members they invited keep
+    // users.invited_by (shown as 已删除成员).
+    await tx.run(`UPDATE invite_codes SET revoked = 1, created_by = NULL WHERE created_by = ?`, id);
     await tx.run(`DELETE FROM users WHERE id = ?`, id);
   });
   broadcastAdmins({ type: 'member_removed', memberId: id });
@@ -660,9 +753,10 @@ app.delete('/api/admin/members/:id', requireAdmin, ah(async (req, res) => {
 // Invite codes
 app.get('/api/admin/invites', requireAdmin, ah(async (_req, res) => {
   const rows = await db.all(
-    `SELECT i.*, u.username AS used_by_username
+    `SELECT i.*, u.username AS used_by_username, c.role AS creator_role, c.display_name AS creator_display_name, c.username AS creator_username
      FROM invite_codes i
      LEFT JOIN users u ON u.id = i.used_by
+     LEFT JOIN users c ON c.id = i.created_by
      ORDER BY i.id DESC`
   );
   res.json({
@@ -676,6 +770,7 @@ app.get('/api/admin/invites', requireAdmin, ah(async (_req, res) => {
       revoked: !!r.revoked,
       note: r.note,
       expiresAt: r.expires_at,
+      createdByName: r.creator_role === 'admin' ? '管理员' : r.creator_role ? (r.creator_display_name || r.creator_username) : '未知',
       status: r.revoked
         ? 'revoked'
         : r.used_by
