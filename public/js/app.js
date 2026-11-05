@@ -6,6 +6,7 @@
     wsConnected: false,
     meta: { ranks: [], suits: [] },
     tab: 'members',
+    chatCtrl: null,
   };
 
   function toast(msg) {
@@ -71,12 +72,18 @@
         }
       } else if (msg.type === 'invite_used') {
         if (state.user?.role === 'member') { toast('「' + msg.displayName + '」已用你的邀请码加入'); loadMyInvite(); }
+      } else if (msg.type === 'chat_message' || msg.type === 'chat_deleted' || msg.type === 'chat_cleared' ||
+                 msg.type === 'chat_muted' || msg.type === 'chat_unmuted' || msg.type === 'chat_error') {
+        if (state.chatCtrl) state.chatCtrl.onEvent(msg);
+        else if (msg.type === 'chat_message' && state.user?.role === 'member') {
+          // badge on chat entry if panel not mounted yet
+        }
       } else if (msg.type === 'force_logout') {
         toast(msg.reason || '已被强制下线');
         logout();
       } else if (msg.type === 'new_suggestion' || msg.type === 'member_joined' ||
                  msg.type === 'member_card_updated' || msg.type === 'member_removed' || msg.type === 'member_updated' ||
-                 msg.type === 'suggestion_updated' || msg.type === 'invites_changed') {
+                 msg.type === 'suggestion_updated' || msg.type === 'invites_changed' || msg.type === 'chat_message' || msg.type === 'chat_deleted' || msg.type === 'chat_cleared') {
         if (state.user?.role === 'admin') {
           // don't wipe an inline name edit in progress; refresh once it closes
           if (state.editingName) state.pendingRefresh = true; else refreshAdminTab();
@@ -400,6 +407,7 @@
         </section>
 
         <div class="mp-grid">
+          ${window.ChatUI ? ChatUI.memberShell() : ''}
           <section class="mp-glass mp-inviter">
             <div class="mp-label">我的邀请人</div>
             <div class="mp-person" id="myInviter"><span class="mp-skel sm"></span></div>
@@ -468,6 +476,10 @@
     loadMyCard();
     loadMySuggestions();
     loadMyInvite();
+    if (window.ChatUI) {
+      state.chatCtrl = ChatUI.bind(document.getElementById('chatPanel') || app, api, toast, { admin: false });
+      state.chatCtrl.markOpen();
+    }
   }
 
   function setupTilt(stage) {
@@ -628,6 +640,7 @@
           <button class="tab" data-tab="ranking">等级排行</button>
           <button class="tab" data-tab="suggestions">建议 / 要求</button>
           <button class="tab" data-tab="invites">邀请码</button>
+          <button class="tab" data-tab="chat">匿名聊天</button>
           <button class="tab" data-tab="security">安全中心</button>
         </div>
         <div id="tabBody"></div>
@@ -655,6 +668,7 @@
       ranking: renderRankingTab,
       suggestions: renderSuggestionsTab,
       invites: renderInvitesTab,
+      chat: renderChatTab,
       security: renderSecurityTab,
     };
     (map[state.tab] || map.members)();
@@ -986,6 +1000,15 @@
     pw_change_bad_current: '改密失败', '2fa_enabled': '开启2FA', '2fa_disabled': '关闭2FA',
     '2fa_reset_by_admin': '管理员重置2FA', forced_logout_by_admin: '被强制下线', unlocked_by_admin: '管理员解锁', display_name_changed: '修改姓名', member_invite_created: '成员生成邀请码', member_invite_revoked: '成员撤销邀请码', logout_others: '退出其他设备',
   };
+
+  async function renderChatTab() {
+    const body = document.getElementById('tabBody');
+    body.innerHTML = window.ChatUI ? ChatUI.adminShell() : '<div class="panel"><div class="empty">聊天模块未加载</div></div>';
+    if (window.ChatUI) {
+      state.chatCtrl = ChatUI.bind(body, api, toast, { admin: true });
+      state.chatCtrl.markOpen();
+    }
+  }
 
   async function renderSecurityTab() {
     const body = document.getElementById('tabBody');

@@ -135,8 +135,13 @@ function originOk(req) {
 function csrfGuard(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   if (!originOk(req)) return res.status(403).json({ error: '请求来源校验失败（CSRF 防护）' });
-  const ct = req.get('content-type') || '';
-  if (req.method !== 'DELETE' && !ct.toLowerCase().startsWith('application/json')) {
+  const ct = (req.get('content-type') || '').toLowerCase();
+  // Raw image upload for anonymous chat (still Origin-checked above).
+  if (req.method === 'POST' && /\/chat\/images\/?$/.test(req.path) &&
+      /^image\/(jpeg|png|webp|gif)\b/.test(ct)) {
+    return next();
+  }
+  if (req.method !== 'DELETE' && !ct.startsWith('application/json')) {
     return res.status(415).json({ error: '请求格式不正确' });
   }
   next();

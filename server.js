@@ -25,6 +25,7 @@ const {
 } = require('./auth');
 const { RANKS, SUITS, validateCard, publicCard, levelOf } = require('./cards');
 const { ensureAdmin } = require('./scripts/setup-admin.js');
+const chat = require('./chat');
 
 const app = express();
 const server = http.createServer(app);
@@ -85,6 +86,13 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
   next();
 });
+app.use(
+  '/api/chat/images',
+  express.raw({
+    type: (req) => /^image\/(jpeg|png|webp|gif)$/i.test(String(req.headers['content-type'] || '').split(';')[0].trim()),
+    limit: chat.MAX_IMAGE_BYTES,
+  })
+);
 app.use(express.json({ limit: '16kb' }));
 app.use(cookieParser());
 
@@ -188,6 +196,58 @@ async function broadcastAdmins(payload) {
   }
 }
 
+/** Push a chat event to every connected user. Members get the public shape; admins get identity. */
+async function broadcastChat(eventType, row) {
+  const pub = { type: eventType, message: chat.publicMessage(row) };
+  const adm = { type: eventType, message: chat.adminMessage(row) };
+  const pubData = JSON.stringify(pub);
+  const admData = JSON.stringify(adm);
+  let adminIds = new Set();
+  try {
+    for (const a of await db.all("SELECT id FROM users WHERE role = 'admin'")) adminIds.add(a.id);
+  } catch (_) {}
+  for (const [uid, set] of socketsByUser) {
+    const data = adminIds.has(uid) ? admData : pubData;
+    for (const ws of set) {
+      if (ws.readyState === 1) {
+        try { ws.send(data); } catch (_) {}
+      }
+    }
+  }
+}
+
+
+async function ensureChatAlias(req) {
+  if (req.user.role === 'admin') {
+    req.session.chatAlias = '管理员';
+    return '管理员';
+  }
+  if (!req.session.chatAlias) {
+    req.session.chatAlias = chat.generateAlias('member');
+    await saveSession(req);
+    try { await db.run('UPDATE user_sessions SET chat_alias = ? WHERE sid = ?', req.session.chatAlias, req.sessionID); } catch (_) {}
+  }
+  return req.session.chatAlias;
+}
+
+async function isMuted(userId) {
+  const row = await db.get('SELECT * FROM chat_mutes WHERE user_id = ?', userId);
+  if (!row) return false;
+  if (row.muted_until && row.muted_until <= sec.nowText()) {
+    await db.run('DELETE FROM chat_mutes WHERE user_id = ?', userId);
+    return false;
+  }
+  return true; // null muted_until = permanent
+}
+
+async function loadChatRow(id) {
+  return db.get(
+    `SELECT m.*, u.username, u.display_name FROM chat_messages m
+     LEFT JOIN users u ON u.id = m.user_id WHERE m.id = ?`,
+    id
+  );
+}
+
 function nowText(offsetMs = 0) {
   return new Date(Date.now() + offsetMs).toISOString().replace('T', ' ').slice(0, 19);
 }
@@ -199,6 +259,7 @@ wss.on('connection', (ws) => {
   });
   ws.on('message', async (raw) => {
     try {
+      if (String(raw).length > 8000) return;
       const msg = JSON.parse(String(raw));
       if (msg.type === 'ping') return ws.send(JSON.stringify({ type: 'pong' }));
       if (msg.type === 'auth' && msg.token) {
@@ -211,11 +272,17 @@ wss.on('connection', (ws) => {
           const user = await findUserById(row.user_id);
           if (user && !user.disabled) {
             attachUser(ws, user.id);
-            ws.send(JSON.stringify({ type: 'auth_ok', role: user.role }));
+            ws._role = user.role;
+            ws._alias = row.alias || (user.role === 'admin' ? '管理员' : '匿名');
+            ws.send(JSON.stringify({ type: 'auth_ok', role: user.role, chatAlias: ws._alias }));
             return;
           }
         }
         ws.send(JSON.stringify({ type: 'auth_fail' }));
+        return;
+      }
+      if (msg.type === 'chat_send' && ws._userId) {
+        await handleWsChatSend(ws, msg);
       }
     } catch (_) {
       /* ignore */
@@ -223,6 +290,27 @@ wss.on('connection', (ws) => {
   });
   ws.on('close', () => detachUser(ws));
 });
+
+async function handleWsChatSend(ws, msg) {
+  const user = await findUserById(ws._userId);
+  if (!user || user.disabled) return ws.send(JSON.stringify({ type: 'chat_error', error: '未登录' }));
+  if (await isMuted(user.id)) return ws.send(JSON.stringify({ type: 'chat_error', error: '你已被禁言，暂时无法发言' }));
+  // per-socket simple throttle
+  const now = Date.now();
+  ws._chatTimes = (ws._chatTimes || []).filter((t) => now - t < 10_000);
+  if (ws._chatTimes.length >= 8) return ws.send(JSON.stringify({ type: 'chat_error', error: '发送太快，请稍候' }));
+  ws._chatTimes.push(now);
+  const v = chat.validateText(msg.text);
+  if (!v.ok) return ws.send(JSON.stringify({ type: 'chat_error', error: v.error }));
+  const alias = user.role === 'admin' ? '管理员' : (ws._alias || '匿名');
+  const info = await db.run(
+    `INSERT INTO chat_messages (user_id, alias, role, msg_type, content, created_at)
+     VALUES (?, ?, ?, 'text', ?, ${NOW})`,
+    user.id, alias, user.role, v.text
+  );
+  const row = await loadChatRow(info.lastInsertRowid);
+  await broadcastChat('chat_message', row);
+}
 
 setInterval(() => {
   db.run(`DELETE FROM ws_tokens WHERE expires_at <= ?`, nowText()).catch(() => {});
@@ -240,13 +328,14 @@ setInterval(() => {
   });
 }, 25_000);
 
-async function issueWsToken(userId) {
+async function issueWsToken(userId, alias = null) {
   const token = crypto.randomBytes(24).toString('hex');
   await db.run(
-    'INSERT INTO ws_tokens (token, user_id, expires_at) VALUES (?, ?, ?)',
+    'INSERT INTO ws_tokens (token, user_id, expires_at, alias) VALUES (?, ?, ?, ?)',
     token,
     userId,
-    nowText(60 * 60 * 1000)
+    nowText(60 * 60 * 1000),
+    alias
   );
   return token;
 }
@@ -292,8 +381,12 @@ async function establishSession(req, user) {
   await regenerateSession(req);
   req.session.userId = user.id;
   req.session.role = user.role;
+  req.session.chatAlias = chat.generateAlias(user.role);
   await saveSession(req);
   await sec.trackSession(req, user.id);
+  try {
+    await db.run('UPDATE user_sessions SET chat_alias = ? WHERE sid = ?', req.session.chatAlias, req.sessionID);
+  } catch (_) {}
 }
 
 const limitJson = (msg) => (req, res) => res.status(429).json({ error: msg });
@@ -344,7 +437,7 @@ app.get('/api/me', requireAuth, (req, res) => {
 });
 
 app.post('/api/ws-token', requireAuth, ah(async (req, res) => {
-  res.json({ token: await issueWsToken(req.user.id) });
+  res.json({ token: await issueWsToken(req.user.id, req.session.chatAlias || null) });
 }));
 
 const GENERIC_LOGIN_ERR = '账号或密码错误';
@@ -384,7 +477,7 @@ app.post('/api/login', ah(async (req, res) => {
   await sec.clearFailures(uname, req.ip);
   await establishSession(req, user);
   await sec.audit(req, { username: uname, userId: user.id, success: true, reason: user.totp_enabled ? 'ok_2fa' : 'ok' });
-  res.json({ user: sanitizeUser(user), wsToken: await issueWsToken(user.id) });
+  res.json({ user: sanitizeUser(user), wsToken: await issueWsToken(user.id, req.session.chatAlias || null), chatAlias: req.session.chatAlias });
 }));
 
 app.post('/api/logout', (req, res) => {
@@ -454,7 +547,7 @@ app.post('/api/register', registerLimiter, ah(async (req, res) => {
   await sec.audit(req, { username: uname, userId: user.id, success: true, reason: 'register' });
   broadcastAdmins({ type: 'member_joined', user: sanitizeUser(user) });
   if (invite.created_by) sendToUser(invite.created_by, { type: 'invite_used', displayName: user.display_name || user.username });
-  res.json({ user: sanitizeUser(user), wsToken: await issueWsToken(user.id) });
+  res.json({ user: sanitizeUser(user), wsToken: await issueWsToken(user.id, req.session.chatAlias || null), chatAlias: req.session.chatAlias });
 }));
 
 app.get('/api/meta/cards', (_req, res) => {
@@ -644,6 +737,215 @@ app.post('/api/my/invite/revoke', requireAuth, sensitiveLimiter, ah(async (req, 
   res.json({ ok: true });
 }));
 
+
+// ---------- Anonymous chat ----------
+const chatLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, limit: 60, standardHeaders: 'draft-7', legacyHeaders: false,
+  keyGenerator: (req) => 'c' + (req.session?.userId || 'anon'),
+  handler: limitJson('发送太频繁，请稍后再试'),
+});
+const chatUploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false,
+  keyGenerator: (req) => 'ci' + (req.session?.userId || 'anon'),
+  handler: limitJson('图片上传太频繁，请稍后再试'),
+});
+
+app.get('/api/chat/meta', requireAuth, (_req, res) => {
+  res.json({ maxTextLen: chat.MAX_TEXT_LEN, maxImageBytes: chat.MAX_IMAGE_BYTES, emoji: chat.EMOJI_PRESET });
+});
+
+app.get('/api/chat/me', requireAuth, (req, res) => {
+  res.json({
+    alias: req.user.role === 'admin' ? '管理员' : (req.session.chatAlias || '匿名'),
+    muted: false, // filled below via async wrapper if needed
+  });
+});
+
+app.get('/api/chat/messages', requireAuth, ah(async (req, res) => {
+  const before = req.query.before ? Number(req.query.before) : null;
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+  const muted = await isMuted(req.user.id);
+  const myAlias = await ensureChatAlias(req);
+  let rows;
+  if (req.user.role === 'admin') {
+    rows = await db.all(
+      `SELECT m.*, u.username, u.display_name FROM chat_messages m
+       LEFT JOIN users u ON u.id = m.user_id
+       WHERE (? IS NULL OR m.id < ?)
+       ORDER BY m.id DESC LIMIT ?`,
+      before, before, limit
+    );
+  } else {
+    rows = await db.all(
+      `SELECT m.*, u.username, u.display_name FROM chat_messages m
+       LEFT JOIN users u ON u.id = m.user_id
+       WHERE m.deleted_at IS NULL AND (? IS NULL OR m.id < ?)
+       ORDER BY m.id DESC LIMIT ?`,
+      before, before, limit
+    );
+  }
+  const list = rows.reverse().map((r) =>
+    req.user.role === 'admin' ? chat.adminMessage(r) : chat.publicMessage(r)
+  );
+  // Strip identity from public shape is already done; double-check no leakage keys for members
+  if (req.user.role !== 'admin') {
+    for (const m of list) {
+      delete m.userId; delete m.username; delete m.displayName; delete m.deletedAt;
+    }
+  }
+  res.json({
+    messages: list,
+    alias: myAlias,
+    muted,
+  });
+}));
+
+app.post('/api/chat/messages', requireAuth, chatLimiter, ah(async (req, res) => {
+  if (await isMuted(req.user.id)) return res.status(403).json({ error: '你已被禁言，暂时无法发言' });
+  const v = chat.validateText(req.body?.text);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const alias = await ensureChatAlias(req);
+  const info = await db.run(
+    `INSERT INTO chat_messages (user_id, alias, role, msg_type, content, created_at)
+     VALUES (?, ?, ?, 'text', ?, ${NOW})`,
+    req.user.id, alias, req.user.role, v.text
+  );
+  const row = await loadChatRow(info.lastInsertRowid);
+  await broadcastChat('chat_message', row);
+  res.json({ message: req.user.role === 'admin' ? chat.adminMessage(row) : chat.publicMessage(row) });
+}));
+
+app.post('/api/chat/images', requireAuth, chatUploadLimiter, ah(async (req, res) => {
+  if (await isMuted(req.user.id)) return res.status(403).json({ error: '你已被禁言，暂时无法发言' });
+  const buf = Buffer.isBuffer(req.body) ? req.body : null;
+  if (!buf || !buf.length) return res.status(400).json({ error: '请上传图片' });
+  const sniffed = chat.sniffImage(buf, req.headers['content-type']);
+  if (!sniffed.ok) return res.status(400).json({ error: sniffed.error });
+  const key = chat.newImageKey();
+  const alias = await ensureChatAlias(req);
+  await db.transaction(async (tx) => {
+    await tx.run(
+      `INSERT INTO chat_images (key, mime, bytes, size, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ${NOW})`,
+      key, sniffed.mime, buf, buf.length, req.user.id
+    );
+    const info = await tx.run(
+      `INSERT INTO chat_messages (user_id, alias, role, msg_type, content, image_key, created_at)
+       VALUES (?, ?, ?, 'image', NULL, ?, ${NOW})`,
+      req.user.id, alias, req.user.role, key
+    );
+    req._chatImageMsgId = info.lastInsertRowid;
+  });
+  const row = await loadChatRow(req._chatImageMsgId);
+  await broadcastChat('chat_message', row);
+  await sec.audit(req, { username: req.user.username, userId: req.user.id, success: true, reason: 'chat_image_upload', detail: key.slice(0, 12) });
+  res.json({ message: req.user.role === 'admin' ? chat.adminMessage(row) : chat.publicMessage(row) });
+}));
+
+app.get('/api/chat/images/:key', requireAuth, ah(async (req, res) => {
+  const key = String(req.params.key || '').replace(/[^a-f0-9]/gi, '').slice(0, 64);
+  if (key.length < 16) return res.status(404).end();
+  const row = await db.get('SELECT mime, bytes, size FROM chat_images WHERE key = ?', key);
+  if (!row) return res.status(404).end();
+  // Members may only fetch images that belong to a non-deleted message
+  if (req.user.role !== 'admin') {
+    const msg = await db.get('SELECT id FROM chat_messages WHERE image_key = ? AND deleted_at IS NULL', key);
+    if (!msg) return res.status(404).end();
+  }
+  const bytes = row.bytes;
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  res.set({
+    'Content-Type': row.mime,
+    'Content-Length': String(buf.length),
+    'Cache-Control': 'private, max-age=3600',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(buf);
+}));
+
+app.delete('/api/admin/chat/messages/:id', requireAdmin, adminWriteLimiter, ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const row = await loadChatRow(id);
+  if (!row) return res.status(404).json({ error: '消息不存在' });
+  if (row.deleted_at) return res.json({ ok: true });
+  await db.run(
+    `UPDATE chat_messages SET deleted_at = ${NOW}, deleted_by = ? WHERE id = ?`,
+    req.user.id, id
+  );
+  const updated = await loadChatRow(id);
+  // Members receive a delete event without identity
+  const delPub = JSON.stringify({ type: 'chat_deleted', id });
+  const delAdm = JSON.stringify({ type: 'chat_deleted', id, message: chat.adminMessage(updated) });
+  let adminIds = new Set();
+  try { for (const a of await db.all("SELECT id FROM users WHERE role = 'admin'")) adminIds.add(a.id); } catch (_) {}
+  for (const [uid, set] of socketsByUser) {
+    const data = adminIds.has(uid) ? delAdm : delPub;
+    for (const ws of set) if (ws.readyState === 1) try { ws.send(data); } catch (_) {}
+  }
+  await sec.audit(req, { username: req.user.username, userId: req.user.id, success: true, reason: 'chat_message_deleted', detail: String(id) });
+  res.json({ ok: true });
+}));
+
+app.post('/api/admin/chat/clear', requireAdmin, adminWriteLimiter, ah(async (req, res) => {
+  await db.transaction(async (tx) => {
+    await tx.run(`UPDATE chat_messages SET deleted_at = ${NOW}, deleted_by = ? WHERE deleted_at IS NULL`, req.user.id);
+  });
+  // Notify everyone to wipe local view
+  const payload = JSON.stringify({ type: 'chat_cleared' });
+  for (const [, set] of socketsByUser) {
+    for (const ws of set) if (ws.readyState === 1) try { ws.send(payload); } catch (_) {}
+  }
+  await sec.audit(req, { username: req.user.username, userId: req.user.id, success: true, reason: 'chat_cleared' });
+  res.json({ ok: true });
+}));
+
+app.get('/api/admin/chat/mutes', requireAdmin, ah(async (_req, res) => {
+  const rows = await db.all(
+    `SELECT m.*, u.username, u.display_name FROM chat_mutes m JOIN users u ON u.id = m.user_id ORDER BY m.created_at DESC`
+  );
+  const now = sec.nowText();
+  res.json({
+    mutes: rows.map((r) => ({
+      userId: r.user_id,
+      username: r.username,
+      displayName: r.display_name || r.username,
+      mutedUntil: r.muted_until,
+      reason: r.reason,
+      permanent: !r.muted_until,
+      active: !r.muted_until || r.muted_until > now,
+      createdAt: r.created_at,
+    })),
+  });
+}));
+
+app.post('/api/admin/chat/mutes', requireAdmin, adminWriteLimiter, ah(async (req, res) => {
+  const userId = Number(req.body?.userId);
+  const member = await findUserById(userId);
+  if (!member || member.role !== 'member') return res.status(404).json({ error: '成员不存在' });
+  const minutes = req.body?.minutes == null ? null : Number(req.body.minutes);
+  if (minutes != null && (!Number.isFinite(minutes) || minutes < 1 || minutes > 60 * 24 * 30)) {
+    return res.status(400).json({ error: '禁言时长需在 1 分钟–30 天之间，或不传表示永久' });
+  }
+  const until = minutes == null ? null : sec.nowText(minutes * 60_000);
+  const reason = req.body?.reason ? String(req.body.reason).trim().slice(0, 80) : null;
+  await db.run(
+    `INSERT INTO chat_mutes (user_id, muted_until, muted_by, reason, created_at) VALUES (?, ?, ?, ?, ${NOW})
+     ON CONFLICT(user_id) DO UPDATE SET muted_until = excluded.muted_until, muted_by = excluded.muted_by, reason = excluded.reason, created_at = excluded.created_at`,
+    userId, until, req.user.id, reason
+  );
+  // SQLite UPSERT works; for PG ON CONFLICT works with PRIMARY KEY. Good.
+  sendToUser(userId, { type: 'chat_muted', mutedUntil: until, reason });
+  await sec.audit(req, { username: member.username, userId, success: true, reason: 'chat_muted', detail: until || 'permanent' });
+  res.json({ ok: true, mutedUntil: until });
+}));
+
+app.delete('/api/admin/chat/mutes/:userId', requireAdmin, adminWriteLimiter, ah(async (req, res) => {
+  const userId = Number(req.params.userId);
+  await db.run('DELETE FROM chat_mutes WHERE user_id = ?', userId);
+  sendToUser(userId, { type: 'chat_unmuted' });
+  await sec.audit(req, { username: String(userId), userId, success: true, reason: 'chat_unmuted' });
+  res.json({ ok: true });
+}));
+
 // ---------- Admin APIs ----------
 app.get('/api/admin/members', requireAdmin, ah(async (_req, res) => {
   const rows = await db.all(`SELECT u.*, ${INVITER_COLS} FROM users u ${INVITER_JOIN} WHERE u.role = 'member' ORDER BY u.id ASC`);
@@ -739,6 +1041,7 @@ app.delete('/api/admin/members/:id', requireAdmin, ah(async (req, res) => {
     await tx.run(`DELETE FROM user_sessions WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM suggestions WHERE user_id = ?`, id);
     await tx.run(`DELETE FROM ws_tokens WHERE user_id = ?`, id);
+    await tx.run(`DELETE FROM chat_mutes WHERE user_id = ?`, id);
     // Codes the member used: detach and mark revoked so they can never be re-used.
     await tx.run(`UPDATE invite_codes SET used_by = NULL, used_at = NULL, revoked = 1 WHERE used_by = ?`, id);
     // Codes the member issued: revoke unused ones and detach creator. Members they invited keep

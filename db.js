@@ -176,9 +176,76 @@ const NEW_COLUMNS = [
   ['users', 'invited_by', 'INTEGER'],
   // 1 = member-issued code, subject to the "one active code per member" rule
   ['invite_codes', 'member_limited', 'INTEGER NOT NULL DEFAULT 0'],
+  ['ws_tokens', 'alias', 'TEXT'],
+  ['user_sessions', 'chat_alias', 'TEXT'],
 ];
 
 /** Post-column migrations (idempotent; same SQL works on SQLite and Postgres). */
+
+const CHAT_SCHEMA_SQLITE = `
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  alias TEXT NOT NULL,
+  role TEXT NOT NULL,
+  msg_type TEXT NOT NULL CHECK(msg_type IN ('text','image')),
+  content TEXT,
+  image_key TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  deleted_at TEXT,
+  deleted_by INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_chat_created ON chat_messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_user ON chat_messages(user_id);
+CREATE TABLE IF NOT EXISTS chat_images (
+  key TEXT PRIMARY KEY,
+  mime TEXT NOT NULL,
+  bytes BLOB NOT NULL,
+  size INTEGER NOT NULL,
+  uploaded_by INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS chat_mutes (
+  user_id INTEGER PRIMARY KEY,
+  muted_until TEXT,
+  muted_by INTEGER,
+  reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`;
+
+const CHAT_SCHEMA_PG = `
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  alias TEXT NOT NULL,
+  role TEXT NOT NULL,
+  msg_type TEXT NOT NULL CHECK(msg_type IN ('text','image')),
+  content TEXT,
+  image_key TEXT,
+  created_at TEXT NOT NULL DEFAULT (${PG_NOW}),
+  deleted_at TEXT,
+  deleted_by INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_chat_created ON chat_messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_user ON chat_messages(user_id);
+CREATE TABLE IF NOT EXISTS chat_images (
+  key TEXT PRIMARY KEY,
+  mime TEXT NOT NULL,
+  bytes BYTEA NOT NULL,
+  size INTEGER NOT NULL,
+  uploaded_by INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (${PG_NOW})
+);
+CREATE TABLE IF NOT EXISTS chat_mutes (
+  user_id INTEGER PRIMARY KEY,
+  muted_until TEXT,
+  muted_by INTEGER,
+  reason TEXT,
+  created_at TEXT NOT NULL DEFAULT (${PG_NOW})
+);
+`;
+
 const POST_MIGRATIONS = [
   // Race-safe guard: at most one active (unused, unrevoked) member-issued code per creator.
   `CREATE UNIQUE INDEX IF NOT EXISTS uniq_member_active_invite ON invite_codes(created_by)
@@ -212,7 +279,7 @@ if (isPg) {
     async all(sql, ...p) { return (await q(toPg(sql), p)).rows; },
     async run(sql, ...p) {
       let s = toPg(sql);
-      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+(ws_tokens|user_sessions|login_throttle)/i.test(s);
+      const isInsert = /^\s*insert/i.test(s) && !/returning/i.test(s) && !/insert\s+into\s+(ws_tokens|user_sessions|login_throttle|chat_images|chat_mutes)/i.test(s);
       if (isInsert) s += ' RETURNING id';
       const r = await q(s, p);
       return { changes: r.rowCount, lastInsertRowid: isInsert && r.rows[0] ? Number(r.rows[0].id) : undefined };
@@ -223,6 +290,7 @@ if (isPg) {
     ...make((s, p) => pool.query(s, p)),
     async init() {
       await pool.query(SCHEMA_PG);
+      await pool.query(CHAT_SCHEMA_PG);
       for (const [t, c, type] of NEW_COLUMNS) {
         await pool.query(`ALTER TABLE ${t} ADD COLUMN IF NOT EXISTS ${c} ${type}`);
       }
@@ -264,6 +332,7 @@ if (isPg) {
     ...ops,
     async init() {
       sdb.exec(SCHEMA_SQLITE);
+      sdb.exec(CHAT_SCHEMA_SQLITE);
       for (const [t, c, type] of NEW_COLUMNS) {
         const cols = sdb.prepare(`PRAGMA table_info(${t})`).all().map((r) => r.name);
         if (!cols.includes(c)) sdb.exec(`ALTER TABLE ${t} ADD COLUMN ${c} ${type}`);

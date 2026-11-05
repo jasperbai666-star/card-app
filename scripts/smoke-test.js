@@ -220,6 +220,76 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     a.username === ua && a.reason === 'display_name_changed' && (a.detail || '').includes(NEWNAME)));
   await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: NEWNAME });
 
+
+  // --- anonymous chat ---
+  {
+    r = await api(mA, 'GET', '/api/chat/messages');
+    const aliasA = r.data.alias;
+    check('chat: member gets session alias', r.status === 200 && !!aliasA && aliasA !== '管理员', aliasA);
+    r = await api(mA, 'POST', '/api/chat/messages', { text: '匿名你好 🎴' });
+    check('chat: text + emoji accepted', r.status === 200 && r.data.message?.text === '匿名你好 🎴' && r.data.message?.alias === aliasA && r.data.message?.userId === undefined);
+    r = await api(mA, 'POST', '/api/chat/messages', { text: '加我微信wxid_test99' });
+    check('chat: wechat-like text blocked', r.status === 400 && /联系方式|微信/.test(r.data.error || ''));
+    r = await api(mA, 'POST', '/api/chat/messages', { text: 'mail me at a@b.com please' });
+    check('chat: email blocked', r.status === 400);
+    r = await api(mA, 'POST', '/api/chat/messages', { text: 'x'.repeat(501) });
+    check('chat: oversized text rejected', r.status === 400);
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+    {
+      const headers = { Origin: ORIGIN, 'Content-Type': 'image/png' };
+      if (mA.cookie) headers.Cookie = mA.cookie;
+      const res = await fetch(BASE + '/api/chat/images', { method: 'POST', headers, body: png });
+      const data = await res.json().catch(() => ({}));
+      check('chat: png upload ok, no identity in response', res.status === 200 && data.message?.type === 'image' && data.message?.imageKey && data.message?.userId === undefined && data.message?.username === undefined, JSON.stringify(data).slice(0, 200));
+      const key = data.message?.imageKey;
+      const resB = await fetch(BASE + '/api/chat/images/' + key, { headers: { Origin: ORIGIN, Cookie: mB.cookie || '' } });
+      check('chat: other member can fetch image when authenticated', resB.status === 200 && (resB.headers.get('content-type') || '').startsWith('image/'));
+      const resAnon = await fetch(BASE + '/api/chat/images/' + key, { headers: { Origin: ORIGIN } });
+      check('chat: unauthenticated cannot fetch image', resAnon.status === 401 || resAnon.status === 403);
+      const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+      const bad = await fetch(BASE + '/api/chat/images', { method: 'POST', headers: { Origin: ORIGIN, 'Content-Type': 'image/png', Cookie: mA.cookie || '' }, body: svg });
+      check('chat: SVG posing as png rejected', bad.status === 400);
+    }
+    r = await api(mB, 'GET', '/api/chat/messages');
+    const leak = JSON.stringify(r.data).match(/"userId"|"username"|"displayName"|"invitedBy"/);
+    check('chat: member history has no identity fields', r.status === 200 && !leak, leak && leak[0]);
+    const chatWsA = await openWs((await api(mA, 'POST', '/api/ws-token', {})).data.token);
+    const chatWsB = await openWs((await api(mB, 'POST', '/api/ws-token', {})).data.token);
+    await api(mA, 'POST', '/api/chat/messages', { text: 'ws-ping-' + sfx });
+    const got = await waitFor(chatWsB.msgs, (m) => m.type === 'chat_message' && m.message?.text === 'ws-ping-' + sfx);
+    check('chat: realtime WS delivery to other member', !!got && got.message.alias === aliasA && got.message.userId === undefined);
+    const mid = got?.message?.id;
+    r = await api(admin, 'DELETE', `/api/admin/chat/messages/${mid}`);
+    check('chat: admin can delete message', r.status === 200);
+    const delEv = await waitFor(chatWsB.msgs, (m) => m.type === 'chat_deleted' && m.id === mid);
+    check('chat: delete event reaches members', !!delEv);
+    r = await api(mB, 'GET', '/api/chat/messages');
+    check('chat: deleted message hidden from members', !(r.data.messages || []).some((x) => x.id === mid));
+    r = await api(admin, 'POST', '/api/admin/chat/mutes', { userId: idA, minutes: 30 });
+    check('chat: admin mute', r.status === 200);
+    r = await api(mA, 'POST', '/api/chat/messages', { text: 'should fail' });
+    check('chat: muted member cannot send', r.status === 403);
+    r = await api(admin, 'DELETE', `/api/admin/chat/mutes/${idA}`);
+    check('chat: unmute', r.status === 200);
+    r = await api(mA, 'POST', '/api/chat/messages', { text: 'unmuted ok' });
+    check('chat: unmuted can send again', r.status === 200);
+    r = await api(admin, 'GET', '/api/chat/messages');
+    check('chat: admin history includes identity mapping', (r.data.messages || []).some((x) => x.username === ua && x.alias));
+    const aliasBefore = aliasA;
+    await api(mA, 'POST', '/api/logout', {});
+    const mArel = {};
+    r = await login(mArel, ua, PW);
+    check('chat: re-login yields alias (new session)', r.status === 200 && !!r.data.chatAlias);
+    // alias should typically change; allow rare collision but require presence
+    check('chat: new session alias is present for members', r.data.chatAlias && r.data.chatAlias !== '管理员');
+    Object.assign(mA, mArel);
+    r = await api(admin, 'POST', '/api/admin/chat/clear', {});
+    check('chat: admin clear', r.status === 200);
+    r = await api(mB, 'GET', '/api/chat/messages');
+    check('chat: after clear members see no live messages', (r.data.messages || []).length === 0);
+    chatWsA.ws.close(); chatWsB.ws.close();
+  }
+
   // --- session rotation ---
   const oldCookie = mA.cookie;
   r = await login(mA2, ua, PW);
@@ -314,6 +384,7 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
   // --- cleanup ---
   if (!process.env.KEEP_TEST_DATA) {
     for (const id of created.members) { const d = await api(admin, "DELETE", `/api/admin/members/${id}`); if (d.status !== 200) console.log("delete member", id, d.status, JSON.stringify(d.data)); }
+    await api(admin, "POST", "/api/admin/chat/clear", {});
     const all = (await api(admin, 'GET', '/api/admin/invites')).data.invites || [];
     for (const i of all) if (created.codes.includes(i.code)) await api(admin, 'DELETE', `/api/admin/invites/${i.id}`);
     const m = await api(admin, 'GET', '/api/admin/members');
