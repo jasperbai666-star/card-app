@@ -1758,16 +1758,17 @@ app.post('/api/goose/score', requireAuth, gooseScoreLimiter, ah(async (req, res)
       gamesPlayed: Number(row.games_played), newBadges: [],
     });
   }
-  if (!Number.isFinite(seed) || !Number.isFinite(durationMs) || durationMs < 3000 || durationMs > 30 * 60 * 1000) {
+  if (!Number.isFinite(seed) || !Number.isFinite(durationMs) || durationMs < 8000 || durationMs > 60 * 60 * 1000) {
     return res.status(400).json({ error: '用时不合理' });
   }
-  if (!Number.isFinite(moves) || moves < 9 || moves > 400) {
+  if (!Number.isFinite(moves) || moves < 30 || moves > 800) {
     return res.status(400).json({ error: '步数不合理' });
   }
-  const v = gooseLogic.validateClear(seed, pickSeq, { triples: 12, typeCount: 6, layers: 4, cols: 6, rows: 6 });
+  const actions = Array.isArray(req.body?.actions) ? req.body.actions : pickSeq;
+  const v = gooseLogic.validateClear(seed, actions, gooseLogic.DEFAULT_OPTS);
   if (!v.ok) return res.status(400).json({ error: v.error || '通关校验失败' });
   // duration vs moves floor ~ 200ms/move
-  if (durationMs < moves * 180) return res.status(400).json({ error: '用时过短，成绩未采纳' });
+  if (durationMs < moves * 120) return res.status(400).json({ error: '用时过短，成绩未采纳' });
 
   const alias = jumpAliasFor(req);
   const prev = await db.get('SELECT * FROM goose_scores WHERE user_id = ?', req.user.id);

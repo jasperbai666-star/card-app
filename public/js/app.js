@@ -486,7 +486,7 @@
                     <h2>抓大鹅</h2>
                     <span class="mp-chip gold" id="gooseBestChip">通关 0</span>
                   </div>
-                  <p class="mp-fine">点可点击的牌进入 7 格槽位，三个相同消除。清空牌堆通关；槽满失败。撤销 / 打乱各 1 次。</p>
+                  <p class="mp-fine">微信同款堆叠三消：层层叠压，只能点露出来的牌。移出 / 撤回 / 洗牌各 1 次。通关不易。</p>
                   <div id="gooseGameRoot" class="gg-root"></div>
                   <div class="mp-head" style="margin-top:14px"><h2>通关榜</h2><span class="mp-chip">TOP 20</span></div>
                   <div id="gooseBoard"><div class="mp-skel"></div></div>
@@ -1011,11 +1011,11 @@
     GooseGame.mount(root, {
       bestClears: clears,
       bestMs,
-      onGameOver: async ({ won, seed, moves, cleared, durationMs, pickSeq }) => {
+      onGameOver: async ({ won, seed, moves, cleared, durationMs, pickSeq, actions }) => {
         try {
           const r = await api('/api/goose/score', {
             method: 'POST',
-            body: { won, seed, moves, cleared, durationMs, pickSeq },
+            body: { won, seed, moves, cleared, durationMs, pickSeq, actions },
           });
           if (chip) {
             chip.textContent = r.clears
@@ -1540,11 +1540,11 @@
         GooseGame.mount(root, {
           bestClears: me.clears || 0,
           bestMs: me.bestMs,
-          onGameOver: async ({ won, seed, moves, cleared, durationMs, pickSeq }) => {
+          onGameOver: async ({ won, seed, moves, cleared, durationMs, pickSeq, actions }) => {
             try {
               const r = await api('/api/goose/score', {
                 method: 'POST',
-                body: { won, seed, moves, cleared, durationMs, pickSeq },
+                body: { won, seed, moves, cleared, durationMs, pickSeq, actions },
               });
               toast(won ? (r.isNewBest ? '🦢 通关 · 新纪录' : '🦢 通关') : '未通关');
               renderGooseAdminTab();

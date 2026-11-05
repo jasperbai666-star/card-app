@@ -273,10 +273,21 @@ async function main() {
     await page.screenshot({ path: path.join(SCREEN_DIR, 'jump-leaderboard.png'), fullPage: true });
     ok('screenshot jump-leaderboard.png');
     await page.locator('.mp-game-tab[data-game="goose"]').click();
-    await page.waitForSelector('#gooseGameRoot .gg-board', { timeout: 10000 });
-    await page.waitForTimeout(500);
+    await page.waitForSelector('#gooseGameRoot .gg-pile .gg-tile', { timeout: 10000 });
+    await page.waitForTimeout(700);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'goose-game.png'), fullPage: true });
     ok('screenshot goose-game.png');
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'goose-stacked.png'), fullPage: true });
+    ok('screenshot goose-stacked.png');
+    // pick a few free tiles for mid-game depth look
+    for (let i = 0; i < 5; i++) {
+      const free = page.locator('#gooseGameRoot .gg-tile.free');
+      if (await free.count()) await free.first().click();
+      await page.waitForTimeout(120);
+    }
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'goose-stacked.png'), fullPage: true });
+    ok('screenshot goose-stacked mid refresh');
     await page.evaluate(() => {
       const over = document.querySelector('#ggOver');
       if (!over) return;
@@ -284,11 +295,13 @@ async function main() {
       const t = document.querySelector('#ggOverTitle');
       const s = document.querySelector('#ggOverSub');
       if (t) t.textContent = '🦢 通关成功！';
-      if (s) s.textContent = '用时 0:42 · 消除 36 · 36 步';
+      if (s) s.textContent = '用时 3:12 · 消除 120 · 120 步';
     });
     await page.waitForTimeout(300);
     await page.screenshot({ path: path.join(SCREEN_DIR, 'goose-win.png'), fullPage: true });
     ok('screenshot goose-win.png');
+    await page.screenshot({ path: path.join(SCREEN_DIR, 'goose-stacked-win.png'), fullPage: true });
+    ok('screenshot goose-stacked-win.png');
     // chat tab exists
     await page.locator('[data-mtab="chat"]').first().click();
     await page.waitForSelector('#chatPanel', { timeout: 10000 });

@@ -895,9 +895,14 @@ th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: u
   .mp-tabbar { display: none; }
 }
 
-/* ===== 抓大鹅 ===== */
+/* ===== 抓大鹅（堆叠） ===== */
 .gg-root { margin-top: 8px; position: relative; }
 .gg-wrap { position: relative; }
+.gg-stacked .gg-pile {
+  perspective: 900px;
+  touch-action: none;
+  overscroll-behavior: none;
+}
 .gg-hud {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
   margin-bottom: 8px;
@@ -910,42 +915,57 @@ th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: u
 }
 .gg-stat strong { color: var(--g1); margin-left: 4px; }
 .gg-hint { font-size: .78rem; color: var(--muted); margin: 0 0 10px; line-height: 1.5; }
-.gg-board {
+.gg-board, .gg-pile {
   position: relative;
   width: 100%;
-  min-height: 220px;
+  min-height: 280px;
   background:
-    radial-gradient(ellipse at 50% 30%, rgba(247,215,122,.08), transparent 55%),
-    linear-gradient(180deg, rgba(20,22,30,.9), rgba(12,14,20,.95));
-  border: 1px solid rgba(247,215,122,.2);
-  border-radius: 16px;
+    radial-gradient(ellipse at 50% 40%, rgba(80,140,70,.22), transparent 55%),
+    radial-gradient(ellipse at 50% 80%, rgba(40,60,30,.35), transparent 50%),
+    linear-gradient(180deg, #2a3a28 0%, #1a2418 55%, #12180f 100%);
+  border: 1px solid rgba(247,215,122,.28);
+  border-radius: 18px;
   overflow: hidden;
-  touch-action: manipulation;
+  box-shadow: inset 0 0 40px rgba(0,0,0,.35);
 }
-.gg-tile {
+.gg-tile, .gg-card {
   position: absolute;
   border-radius: 12px;
-  border: 1px solid rgba(0,0,0,.18);
-  box-shadow: 0 4px 10px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.55);
+  border: 1.5px solid rgba(255,255,255,.55);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,.65) inset,
+    0 4px 2px rgba(0,0,0,.15),
+    0 8px 16px rgba(0,0,0,.35),
+    0 0 0 1px rgba(20,16,8,.2);
   display: flex; align-items: center; justify-content: center;
   cursor: pointer; padding: 0;
   font-family: inherit;
-  transition: transform .12s ease, filter .12s ease, opacity .12s ease;
+  transform: rotate(var(--gg-rot, 0deg)) translateZ(calc(var(--gg-depth, 0) * 1px));
+  transition: transform .14s ease, filter .14s ease, opacity .14s ease, box-shadow .14s ease;
   -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
 }
 .gg-tile.free:hover, .gg-tile.free:focus-visible {
-  transform: translateY(-2px) scale(1.04);
-  outline: 2px solid rgba(247,215,122,.7);
+  transform: rotate(var(--gg-rot, 0deg)) translateY(-4px) scale(1.06);
+  outline: 2px solid rgba(247,215,122,.85);
   outline-offset: 1px;
-  z-index: 80 !important;
+  z-index: 200 !important;
+  box-shadow:
+    0 1px 0 rgba(255,255,255,.8) inset,
+    0 10px 22px rgba(0,0,0,.45),
+    0 0 12px rgba(247,215,122,.35);
 }
 .gg-tile.blocked {
-  filter: brightness(.72) saturate(.85);
+  filter: brightness(.55) saturate(.7);
   cursor: not-allowed;
-  opacity: .92;
+  opacity: .9;
+  box-shadow:
+    0 1px 0 rgba(255,255,255,.25) inset,
+    0 2px 6px rgba(0,0,0,.4);
 }
 .gg-tile:disabled { cursor: default; }
-.gg-emoji { font-size: 1.35rem; line-height: 1; pointer-events: none; }
+.gg-emoji { font-size: 1.4rem; line-height: 1; pointer-events: none;
+  filter: drop-shadow(0 1px 0 rgba(255,255,255,.4)); }
 .gg-tray {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
@@ -953,28 +973,47 @@ th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: u
   margin-top: 12px;
   padding: 10px;
   border-radius: 14px;
-  background: rgba(0,0,0,.35);
-  border: 1px solid rgba(247,215,122,.22);
+  background: linear-gradient(180deg, rgba(30,24,12,.85), rgba(12,10,6,.95));
+  border: 1px solid rgba(247,215,122,.3);
+  box-shadow: inset 0 0 20px rgba(0,0,0,.35);
 }
 .gg-slot {
   aspect-ratio: 1;
   border-radius: 10px;
-  border: 1px dashed rgba(255,255,255,.15);
-  background: rgba(255,255,255,.03);
+  border: 1px dashed rgba(255,255,255,.18);
+  background: rgba(255,255,255,.04);
   display: flex; align-items: center; justify-content: center;
 }
 .gg-slot.filled {
   border-style: solid;
   border-color: rgba(0,0,0,.2);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.4);
+  box-shadow:
+    0 1px 0 rgba(255,255,255,.5) inset,
+    0 3px 8px rgba(0,0,0,.35);
+}
+.gg-side {
+  display: flex; gap: 8px; min-height: 52px; align-items: center;
+  margin-top: 10px; padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px dashed rgba(247,215,122,.25);
+  background: rgba(0,0,0,.25);
+}
+.gg-side.empty { opacity: .7; }
+.gg-side-ph { font-size: .75rem; color: var(--muted); letter-spacing: .12em; }
+.gg-side-tile {
+  width: 44px; height: 44px; border-radius: 10px;
+  border: 1px solid rgba(0,0,0,.2);
+  box-shadow: 0 3px 8px rgba(0,0,0,.35);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; padding: 0; font-family: inherit;
 }
 .gg-tools {
   display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;
 }
 .gg-over {
-  position: absolute; inset: 0; z-index: 20;
+  position: absolute; inset: 0; z-index: 30;
   display: flex; align-items: center; justify-content: center;
-  background: rgba(6,7,12,.72);
+  background: rgba(6,7,12,.74);
   border-radius: 16px;
   backdrop-filter: blur(4px);
 }
@@ -990,6 +1029,11 @@ th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: u
 }
 .gg-over-title { font-size: 1.2rem; color: var(--g1); font-weight: 700; margin-bottom: 8px; }
 .gg-over-sub { font-size: .85rem; color: var(--muted); margin-bottom: 14px; line-height: 1.5; }
+html.gg-noscroll, html.gg-noscroll body {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+}
 
+/* Admin tabs wrap nicer on narrow */
 /* Admin tabs wrap nicer on narrow */
 .tabs { row-gap: 8px; }

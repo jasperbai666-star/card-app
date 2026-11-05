@@ -404,51 +404,41 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
   // --- 抓大鹅 ---
   {
     const goose = require('../goose-logic');
-    function solveGoose(seed) {
-      const game = goose.createGame(seed, { triples: 12, typeCount: 6, layers: 4, cols: 6, rows: 6 });
-      const seq = [];
-      for (let i = 0; i < 500 && game.status === 'playing'; i++) {
-        const free = goose.freeTiles(game.tiles);
-        if (!free.length) break;
-        const counts = {};
-        for (const x of game.tray) counts[x] = (counts[x] || 0) + 1;
-        free.sort((a, b) => (counts[b.type] || 0) - (counts[a.type] || 0));
-        let chosen = null;
-        for (const t of free) {
-          const sim = goose.insertAndClear(game.tray.slice(), t.type);
-          if (sim.tray.length < goose.TRAY_SIZE || sim.cleared) { chosen = t; break; }
-        }
-        if (!chosen) chosen = free[0];
-        if (!goose.pickTile(game, chosen.id).ok) break;
-        seq.push(chosen.id);
-      }
-      return { status: game.status, seq, moves: game.moves };
-    }
     r = await api(mA, 'GET', '/api/goose/me');
     check('goose: me returns clears', r.status === 200 && r.data.clears === 0);
     r = await api(mA, 'POST', '/api/goose/score', { won: false, seed: 1, moves: 3, durationMs: 5000, pickSeq: [] });
     check('goose: loss still counted as played', r.status === 200 && r.data.won === false && r.data.gamesPlayed >= 1);
-    const sol = solveGoose(42);
-    check('goose: local solver wins seed 42', sol.status === 'won' && sol.seq.length >= 9, sol.status);
+
+    const lv = goose.generateLevel(42);
+    check('goose: stacked level ~120 tiles', lv.tiles.length === 120, lv.tiles.length);
+    const g0 = goose.createGame(42);
+    const freeN = goose.freeTiles(g0.tiles, g0.overlap).length;
+    const blockedN = g0.tiles.length - freeN;
+    check('goose: majority covered at start', blockedN > freeN && freeN >= 5, `free=${freeN} blocked=${blockedN}`);
+    const blocked = g0.tiles.find((x) => !x.removed && !goose.isFree(g0.tiles, x, g0.overlap));
+    check('goose: covered pick rejected', !goose.pickTile(g0, blocked.id).ok);
+
+    const actions = lv.solution.map((id) => ({ op: 'pick', id }));
+    check('goose: local solution validates', goose.validateClear(42, actions).ok);
     r = await api(mA, 'POST', '/api/goose/score', {
-      won: true, seed: 42, moves: sol.moves, durationMs: Math.max(8000, sol.moves * 200), pickSeq: sol.seq,
+      won: true, seed: 42, moves: 120, durationMs: Math.max(20000, 120 * 150), pickSeq: lv.solution, actions,
     });
     check('goose: accept validated clear', r.status === 200 && r.data.won && r.data.clears >= 1 && r.data.isNewBest, JSON.stringify(r.data));
     r = await api(mA, 'GET', '/api/my/achievements');
     check('goose: newbie badge unlocked', (r.data.badges || []).some((b) => b.key === 'goose_newbie' && b.unlocked));
     r = await api(mA, 'POST', '/api/goose/score', {
-      won: true, seed: 42, moves: sol.moves, durationMs: 1000, pickSeq: sol.seq,
+      won: true, seed: 42, moves: 120, durationMs: 1000, actions,
     });
     check('goose: too-fast clear rejected', r.status === 400);
     r = await api(mA, 'POST', '/api/goose/score', {
-      won: true, seed: 42, moves: sol.moves, durationMs: 9000, pickSeq: sol.seq.slice(0, 5),
+      won: true, seed: 42, moves: 120, durationMs: 25000, actions: actions.slice(0, 10),
     });
     check('goose: incomplete seq rejected', r.status === 400);
-    // two more clears for pro
     for (const seed of [1, 7]) {
-      const s2 = solveGoose(seed);
+      const lv2 = goose.generateLevel(seed);
+      const act2 = lv2.solution.map((id) => ({ op: 'pick', id }));
       r = await api(mA, 'POST', '/api/goose/score', {
-        won: true, seed, moves: s2.moves, durationMs: Math.max(8000, s2.moves * 200), pickSeq: s2.seq,
+        won: true, seed, moves: act2.length, durationMs: Math.max(20000, act2.length * 150), pickSeq: lv2.solution, actions: act2,
       });
     }
     check('goose: third clear accepted', r.status === 200 && r.data.clears >= 3, JSON.stringify(r.data));
@@ -459,11 +449,12 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     check('goose: leaderboard alias only for members', r.status === 200 && grow && grow.clears >= 3 && grow.alias && grow.username === undefined);
     r = await api(admin, 'GET', '/api/goose/leaderboard');
     check('goose: admin leaderboard includes identity', (r.data.leaderboard || []).some((x) => x.username === ua));
-    check('goose: unauth score blocked', (await api({}, 'POST', '/api/goose/score', { won: true, seed: 1, moves: 36, durationMs: 9000, pickSeq: [] })).status === 401);
+    check('goose: unauth score blocked', (await api({}, 'POST', '/api/goose/score', { won: true, seed: 1, moves: 120, durationMs: 25000, actions: [] })).status === 401);
     check('goose: /games SPA route', (await fetch(BASE + '/games')).status === 200);
     check('goose: client asset', (await fetch(BASE + '/js/goose-game.js')).status === 200);
+    const clientJs = await (await fetch(BASE + '/js/goose-game.js')).text();
+    check('goose: client has stacked pile + 移出', /gg-pile/.test(clientJs) && /移出/.test(clientJs));
   }
-
 
   // --- session rotation ---
   const oldCookie = mA.cookie;
