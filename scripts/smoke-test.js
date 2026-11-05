@@ -97,11 +97,13 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     inv.some((i) => i.code === codeA && i.note === '测试-' + sfx) && inv.some((i) => i.code === codeExp && i.status === 'expired'));
 
   // --- register (password policy, XSS payload in display name) ---
-  const XSS_NAME = '<img src=x onerror=alert(1)>';
+  const XSS_NAME = '<svg/onload=alert()>'; // 20 chars (display-name max)
   const mA = {}, mA2 = {}, mB = {};
   const ua = 'ta_' + sfx, ub = 'tb_' + sfx;
   r = await api(mA, 'POST', '/api/register', { username: ua, password: 'short', inviteCode: codeA });
   check('password < 8 chars rejected', r.status === 400);
+  r = await api(mA, 'POST', '/api/register', { username: ua, password: PW, inviteCode: codeA, displayName: '名'.repeat(21) });
+  check('register: display name > 20 chars rejected', r.status === 400);
   r = await api(mA, 'POST', '/api/register', { username: ua, password: PW, inviteCode: codeA, displayName: XSS_NAME });
   const idA = r.data.user?.id; if (idA) created.members.push(idA);
   check('member A registers', r.status === 200 && idA, JSON.stringify(r.data));
@@ -140,6 +142,40 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     if (x.status === 429) limited = true;
   }
   check('suggestion rate limit (429 after 10 / 10 min)', limited);
+
+  // --- admin renames member (display name only) ---
+  r = await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: '  小明 ' + sfx + '  ' });
+  const NEWNAME = '小明 ' + sfx;
+  check('admin renames member (trimmed)', r.status === 200 && r.data.member?.displayName === NEWNAME && r.data.changed, JSON.stringify(r.data));
+  const pu = await waitFor(memWs.msgs, (m) => m.type === 'profile_updated', 5000);
+  check('member WS live profile_updated', pu && pu.user?.displayName === NEWNAME);
+  check('admin WS live member_updated', await waitFor(adminWs.msgs, (m) => m.type === 'member_updated' && m.memberId === idA, 5000));
+  r = await api(mA, 'GET', '/api/me');
+  check('member sees new name, login username unchanged', r.data.user?.displayName === NEWNAME && r.data.user?.username === ua);
+  r = await api(admin, 'GET', '/api/admin/ranking');
+  check('ranking shows new name', (r.data.ranking || []).some((x) => x.id === idA && x.displayName === NEWNAME) ||
+    (r.data.ranking || []).some((x) => x.displayName === NEWNAME), JSON.stringify(r.data).slice(0, 200));
+  r = await api(admin, 'GET', '/api/admin/suggestions');
+  check('suggestions show new name', (r.data.suggestions || []).some((x) => x.content === XSS_SUG && x.displayName === NEWNAME));
+  r = await api(admin, 'GET', '/api/admin/members');
+  check('member list shows new name', (r.data.members || []).some((x) => x.id === idA && x.displayName === NEWNAME));
+  check('rename: blank rejected', (await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: '   ' })).status === 400);
+  check('rename: 21 chars rejected', (await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: '一'.repeat(21) })).status === 400);
+  check('rename: non-string rejected', (await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: { a: 1 } })).status === 400);
+  r = await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: '\u202e' + '二'.repeat(20) + '\u200b' });
+  check('rename: 20 chars OK, invisible/bidi chars stripped', r.status === 200 && r.data.member?.displayName === '二'.repeat(20), JSON.stringify(r.data));
+  r = await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: XSS_NAME });
+  check('rename: HTML stored verbatim (escaped at render)', r.status === 200 && r.data.member?.displayName === XSS_NAME);
+  check('rename: CSRF (no Origin) rejected', (await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: 'x' }, { origin: null })).status === 403);
+  check('member cannot rename self', (await api(mA, 'PUT', `/api/admin/members/${idA}/name`, { displayName: '自改' })).status === 403);
+  check('member cannot rename others', (await api(mA, 'PUT', `/api/admin/members/${idB}/name`, { displayName: '乱改' })).status === 403);
+  const meAfter = (await api(mA, 'GET', '/api/me')).data.user;
+  check('member name unchanged by member attempts', meAfter?.displayName === XSS_NAME);
+  check('rename unknown member → 404', (await api(admin, 'PUT', '/api/admin/members/99999999/name', { displayName: 'x' })).status === 404);
+  r = await api(admin, 'GET', '/api/admin/audit?limit=100');
+  check('rename audit-logged with old → new detail', (r.data.audit || []).some((a) =>
+    a.username === ua && a.reason === 'display_name_changed' && (a.detail || '').includes(NEWNAME)));
+  await api(admin, 'PUT', `/api/admin/members/${idA}/name`, { displayName: NEWNAME });
 
   // --- session rotation ---
   const oldCookie = mA.cookie;

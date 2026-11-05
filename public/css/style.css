@@ -312,3 +312,12 @@ th { color: var(--muted); font-weight: 500; font-size: .78rem; text-transform: u
 .qr-wrap img { width: 200px; height: 200px; background: #fff; padding: 8px; border-radius: 10px; }
 .badge-expired { background: rgba(255,255,255,.08); color: var(--muted); }
 #tfaSecret { word-break: break-all; }
+
+.btn-xs { padding: 3px 8px; font-size: .72rem; border-radius: 8px; }
+.name-view { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.name-edit { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.name-edit.hidden { display: none !important; }
+.name-input { width: 9.5em; padding: 6px 8px; font-size: .85rem; }
+.name-edit .btn { width: auto; margin-top: 0; }
+.name-edit { flex-wrap: nowrap; }
+.name-cell { min-width: 9.5em; }

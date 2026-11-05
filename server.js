@@ -292,6 +292,11 @@ const suggestionLimiter = rateLimit({
   keyGenerator: (req) => 'u' + (req.session?.userId || 'anon'),
   handler: limitJson('提交太频繁，请稍后再试（每 10 分钟最多 10 条）'),
 });
+const adminWriteLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: 120, standardHeaders: 'draft-7', legacyHeaders: false,
+  keyGenerator: (req) => 'a' + (req.session?.userId || 'anon'),
+  handler: limitJson('操作太频繁，请稍后再试'),
+});
 const sensitiveLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false,
   keyGenerator: (req) => 'u' + (req.session?.userId || 'anon'),
@@ -307,7 +312,7 @@ function formatSuggestion(row) {
     id: row.id,
     userId: row.user_id,
     username: row.username,
-    displayName: row.display_name,
+    displayName: row.display_name || row.username,
     type: row.type,
     content: row.content,
     status: row.status,
@@ -388,6 +393,12 @@ app.post('/api/register', registerLimiter, ah(async (req, res) => {
   }
   const pwErr = checkPasswordPolicy(password);
   if (pwErr) return res.status(400).json({ error: pwErr });
+  let dispName = uname;
+  if (typeof displayName === 'string' && displayName.trim()) {
+    const v = sec.normalizeDisplayName(displayName);
+    if (!v.ok) return res.status(400).json({ error: v.error });
+    dispName = v.name;
+  }
   const code = String(inviteCode).trim().toUpperCase().slice(0, 16);
 
   const invite = await db.get('SELECT * FROM invite_codes WHERE code = ?', code);
@@ -408,7 +419,7 @@ app.post('/api/register', registerLimiter, ah(async (req, res) => {
          VALUES (?, ?, 'member', ?, ?)`,
         uname,
         pwHash,
-        displayName ? String(displayName).trim().slice(0, 24) || uname : uname,
+        dispName,
         code
       );
       const upd = await tx.run(
@@ -595,6 +606,31 @@ app.put('/api/admin/members/:id/card', requireAdmin, ah(async (req, res) => {
   res.json({ member: sanitizeUser(updated) });
 }));
 
+// Rename a member (display name only; login username never changes). Admin-only by design:
+// there is intentionally no member-facing endpoint for this.
+app.put('/api/admin/members/:id/name', requireAdmin, adminWriteLimiter, ah(async (req, res) => {
+  const id = Number(req.params.id);
+  const member = await findUserById(id);
+  if (!member || member.role !== 'member') return res.status(404).json({ error: '成员不存在' });
+  const v = sec.normalizeDisplayName(req.body?.displayName);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const oldName = member.display_name || member.username;
+  if (v.name !== oldName || !member.display_name) {
+    await db.run('UPDATE users SET display_name = ? WHERE id = ?', v.name, id);
+  }
+  const updated = await findUserById(id);
+  if (v.name !== oldName) {
+    await sec.audit(req, {
+      username: member.username, userId: id, success: true, reason: 'display_name_changed',
+      detail: `${oldName} → ${v.name}（操作人 ${req.user.username}）`,
+    });
+    const pub = sanitizeUser(updated);
+    sendToUser(id, { type: 'profile_updated', user: pub });
+    broadcastAdmins({ type: 'member_updated', memberId: id, member: pub });
+  }
+  res.json({ member: sanitizeUser(updated), changed: v.name !== oldName });
+}));
+
 app.post('/api/admin/members/:id/disable', requireAdmin, ah(async (req, res) => {
   const id = Number(req.params.id);
   const member = await findUserById(id);
@@ -739,7 +775,7 @@ app.get('/api/admin/audit', requireAdmin, ah(async (req, res) => {
   res.json({
     audit: rows.map((r) => ({
       id: r.id, createdAt: r.created_at, username: r.username, userId: r.user_id,
-      ip: r.ip, userAgent: r.user_agent, success: !!r.success, reason: r.reason,
+      ip: r.ip, userAgent: r.user_agent, success: !!r.success, reason: r.reason, detail: r.detail || null,
     })),
   });
 }));

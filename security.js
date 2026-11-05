@@ -68,11 +68,11 @@ async function clearFailures(username, ip) {
 }
 
 // ---------- audit ----------
-async function audit(req, { username, userId = null, success, reason }) {
+async function audit(req, { username, userId = null, success, reason, detail = null }) {
   try {
     await db.run(
-      'INSERT INTO login_audit (username, user_id, ip, user_agent, success, reason) VALUES (?, ?, ?, ?, ?, ?)',
-      clip(username, 64), userId, clip(req.ip, 64), clip(req.get('user-agent'), 300), success ? 1 : 0, clip(reason, 64)
+      'INSERT INTO login_audit (username, user_id, ip, user_agent, success, reason, detail) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      clip(username, 64), userId, clip(req.ip, 64), clip(req.get('user-agent'), 300), success ? 1 : 0, clip(reason, 64), clip(detail, 200)
     );
   } catch (e) {
     console.error('audit failed', e.message);
@@ -162,7 +162,19 @@ function verifyTotp(secret, code, lastStep) {
   return step;
 }
 
+// Display name: trimmed, control/invisible/bidi chars removed, 1..20 characters (code points).
+const NAME_STRIP_RE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
+function normalizeDisplayName(v) {
+  if (typeof v !== 'string') return { ok: false, error: '姓名不能为空' };
+  const name = v.replace(NAME_STRIP_RE, '').replace(/\s+/g, ' ').trim();
+  const len = [...name].length;
+  if (len < 1) return { ok: false, error: '姓名不能为空' };
+  if (len > 20) return { ok: false, error: '姓名最多 20 个字' };
+  return { ok: true, name };
+}
+
 module.exports = {
+  normalizeDisplayName,
   nowText, clip,
   isLocked, recordFailure, clearFailures, LOCK_MINUTES,
   audit,

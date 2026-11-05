@@ -172,6 +172,7 @@ const NEW_COLUMNS = [
   ['users', 'password_changed_at', 'TEXT'],
   ['invite_codes', 'expires_at', 'TEXT'],
   ['invite_codes', 'note', 'TEXT'],
+  ['login_audit', 'detail', 'TEXT'],
 ];
 
 function toPg(sql) {

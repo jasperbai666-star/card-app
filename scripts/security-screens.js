@@ -31,7 +31,7 @@ async function api(jar, method, p, body) {
   const inv = await api(admin, 'POST', '/api/admin/invites', { count: 1, expiresInDays: 3, note: '截图演示' });
   const code = inv.data.codes[0];
   await api(admin, 'POST', '/api/admin/invites', { count: 1, expiresInDays: 0.00001, note: '已过期示例' });
-  const reg = await api(mem, 'POST', '/api/register', { username: uname, password: pw, inviteCode: code, displayName: '<img src=x onerror="window.__xss=1">' });
+  const reg = await api(mem, 'POST', '/api/register', { username: uname, password: pw, inviteCode: code, displayName: '<img src onerror=f>' });
   const id = reg.data.user.id;
   await api(admin, 'PUT', `/api/admin/members/${id}/card`, { rank: 'A', suit: 'spade' });
   await api(mem, 'POST', '/api/my/suggestions', { type: 'suggestion', content: '<script>window.__xss=2</script><img src=x onerror="window.__xss=3"> XSS 测试' });
@@ -66,7 +66,41 @@ async function api(jar, method, p, body) {
   await page.waitForURL('**/admin', { timeout: 15000 });
   await page.waitForTimeout(1200);
   await page.screenshot({ path: path.join(OUT, 'security-members.png') });
-  check('members tab: XSS display name shown as text', (await page.content()).includes('&lt;img src=x onerror='));
+  check('members tab: XSS display name shown as text', (await page.content()).includes('&lt;img src onerror=f&gt;'));
+
+  // --- admin renames the test member inline; member's open page updates live ---
+  const mctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const mpage = await mctx.newPage();
+  mpage.on('pageerror', (e) => issues.push('member pageerror:' + e.message));
+  // member has 2FA on: log in via API in the browser context is simpler -> disable 2FA first via admin reset
+  await api(admin, 'POST', `/api/admin/members/${id}/reset-2fa`, {});
+  await mpage.goto(BASE + '/login', { waitUntil: 'networkidle' });
+  await mpage.fill('input[name=username]', uname);
+  await mpage.fill('input[name=password]', pw);
+  await mpage.click('button[type=submit]');
+  await mpage.waitForURL('**/member', { timeout: 15000 });
+  await mpage.waitForSelector('.live-dot:not(.off)', { timeout: 10000 }).catch(() => {});
+  await page.reload({ waitUntil: 'networkidle' }); await page.waitForTimeout(1000);
+  const row = page.locator('tr', { hasText: '@' + uname });
+  await row.locator('.edit-name').click();
+  await row.locator('.name-input').fill('张三 · 新名字');
+  await page.waitForTimeout(300);
+  await row.screenshot({ path: path.join(OUT, 'rename-row.png') }).catch(() => {});
+  await row.scrollIntoViewIfNeeded();
+  await page.locator('.panel').first().screenshot({ path: path.join(OUT, 'rename.png') });
+  await row.locator('.name-edit button[type=submit]').click();
+  await page.waitForFunction((u) => [...document.querySelectorAll('tr')].some((tr) => tr.textContent.includes('@' + u) && tr.querySelector('.mem-name')?.textContent === '张三 · 新名字'), uname, { timeout: 10000 }).then(() => check('admin inline rename saved', true), () => check('admin inline rename saved', false));
+  await mpage.waitForFunction(() => document.querySelector('.who-name')?.textContent === '张三 · 新名字', null, { timeout: 10000 })
+    .then(() => check('member page header updated live via WebSocket', true), () => check('member page header updated live via WebSocket', false));
+  await mpage.screenshot({ path: path.join(OUT, 'rename-member-view.png') });
+  await mctx.close();
+  // inline validation: blank name is refused client-side
+  await row.locator('.edit-name').click();
+  await row.locator('.name-input').fill('   ');
+  await row.locator('.name-edit button[type=submit]').click();
+  await page.waitForTimeout(500);
+  check('blank name refused, still in edit mode', await row.locator('.name-edit').isVisible());
+  await row.locator('.name-cancel').click();
   await page.click('.tab[data-tab=suggestions]'); await page.waitForTimeout(800);
   check('suggestions tab: XSS shown as text', (await page.textContent('body')).includes('<script>window.__xss=2</script>'));
   await page.click('.tab[data-tab=invites]'); await page.waitForTimeout(800);
@@ -74,7 +108,7 @@ async function api(jar, method, p, body) {
   await page.click('.tab[data-tab=security]'); await page.waitForTimeout(1200);
   await page.screenshot({ path: path.join(OUT, 'security-center.png'), fullPage: true });
   check('security center lists audit log', (await page.textContent('body')).includes('登录日志'));
-  check('no injected <img src=x>/<svg onload> elements', (await page.$$('img[src="x"], svg[onload]')).length === 0);
+  check('no injected <img src=x>/<svg onload> elements', (await page.$$('img[src="x"], svg[onload], img[onerror], .mem-name *')).length === 0);
   check('no XSS executed', !(await page.evaluate(() => window.__xss)));
   await page.click('#settingsBtn'); await page.waitForURL('**/settings'); await page.waitForTimeout(800);
   await page.screenshot({ path: path.join(OUT, 'security-settings.png'), fullPage: true });

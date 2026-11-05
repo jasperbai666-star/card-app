@@ -62,14 +62,21 @@
           renderMemberCard(msg.card, true);
           toast('你的卡牌已更新');
         }
+      } else if (msg.type === 'profile_updated') {
+        if (msg.user && state.user && msg.user.id === state.user.id) {
+          state.user = { ...state.user, displayName: msg.user.displayName };
+          document.querySelectorAll('.who-name').forEach((el) => { el.textContent = msg.user.displayName; });
+          toast('管理员已把你的姓名改为「' + msg.user.displayName + '」');
+        }
       } else if (msg.type === 'force_logout') {
         toast(msg.reason || '已被强制下线');
         logout();
       } else if (msg.type === 'new_suggestion' || msg.type === 'member_joined' ||
-                 msg.type === 'member_card_updated' || msg.type === 'member_removed' ||
+                 msg.type === 'member_card_updated' || msg.type === 'member_removed' || msg.type === 'member_updated' ||
                  msg.type === 'suggestion_updated') {
         if (state.user?.role === 'admin') {
-          refreshAdminTab();
+          // don't wipe an inline name edit in progress; refresh once it closes
+          if (state.editingName) state.pendingRefresh = true; else refreshAdminTab();
           if (msg.type === 'new_suggestion') toast('收到新的建议/要求');
         }
         if (state.user?.role === 'member' && msg.type === 'suggestion_updated') {
@@ -144,8 +151,8 @@
             ${mode === 'register' ? `
               <label>邀请码</label>
               <input name="inviteCode" class="mono" placeholder="8位邀请码" required maxlength="16" autocomplete="off" />
-              <label>显示名称（可选）</label>
-              <input name="displayName" placeholder="昵称" maxlength="24" />
+              <label>姓名（可选）</label>
+              <input name="displayName" placeholder="姓名（不填则用账号名）" maxlength="20" />
             ` : ''}
             <label>账号</label>
             <input name="username" placeholder="用户名" required maxlength="24" autocomplete="username" />
@@ -206,7 +213,7 @@
         <div class="topbar">
           <div>
             <h1 class="glow-title" style="font-size:1.2rem">安全设置</h1>
-            <div class="who">${escapeHtml(u.displayName || u.username)} · @${escapeHtml(u.username)}</div>
+            <div class="who"><span class="who-name">${escapeHtml(u.displayName || u.username)}</span> · @${escapeHtml(u.username)}</div>
           </div>
           <button class="btn btn-ghost btn-sm" id="backBtn">返回</button>
         </div>
@@ -364,7 +371,7 @@
         <div class="topbar">
           <div>
             <h1 class="glow-title" style="font-size:1.2rem">我的卡牌</h1>
-            <div class="who"><span class="live-dot ${state.wsConnected ? '' : 'off'}"></span>${escapeHtml(state.user.displayName || state.user.username)}</div>
+            <div class="who"><span class="live-dot ${state.wsConnected ? '' : 'off'}"></span><span class="who-name">${escapeHtml(state.user.displayName || state.user.username)}</span></div>
           </div>
           <div class="row-actions">
             <button class="btn btn-ghost btn-sm" id="settingsBtn">安全设置</button>
@@ -496,6 +503,8 @@
 
   function refreshAdminTab() {
     if (state.user?.role !== 'admin') return;
+    state.editingName = false;
+    state.pendingRefresh = false;
     const map = {
       members: renderMembersTab,
       ranking: renderRankingTab,
@@ -530,8 +539,16 @@
               <tbody>
                 ${members.map((m) => `
                   <tr data-id="${m.id}">
-                    <td>
-                      <strong>${escapeHtml(m.displayName)}</strong>
+                    <td class="name-cell">
+                      <div class="name-view">
+                        <strong class="mem-name">${escapeHtml(m.displayName)}</strong>
+                        <button class="btn btn-ghost btn-xs edit-name" title="修改姓名">修改姓名</button>
+                      </div>
+                      <form class="name-edit hidden">
+                        <input class="name-input" maxlength="20" value="${escapeHtml(m.displayName)}" aria-label="新姓名" />
+                        <button class="btn btn-primary btn-xs" type="submit">保存</button>
+                        <button class="btn btn-ghost btn-xs name-cancel" type="button">取消</button>
+                      </form>
                       <div style="font-size:.78rem;color:var(--muted)">@${escapeHtml(m.username)}</div>
                     </td>
                     <td>${CardsUI.mini(m.card)}</td>
@@ -596,6 +613,33 @@
           try {
             await api(`/api/admin/members/${id}/card`, { method: 'PUT', body: { rank: null } });
             toast('已清空');
+            refreshAdminTab();
+          } catch (ex) { toast(ex.message); }
+        };
+        const view = tr.querySelector('.name-view');
+        const form = tr.querySelector('.name-edit');
+        const input = tr.querySelector('.name-input');
+        tr.querySelector('.edit-name').onclick = () => {
+          state.editingName = true;
+          view.classList.add('hidden'); form.classList.remove('hidden');
+          input.value = m.displayName; input.focus(); input.select();
+        };
+        const closeEdit = () => {
+          state.editingName = false;
+          form.classList.add('hidden'); view.classList.remove('hidden');
+          if (state.pendingRefresh) refreshAdminTab();
+        };
+        tr.querySelector('.name-cancel').onclick = closeEdit;
+        input.onkeydown = (e) => { if (e.key === 'Escape') closeEdit(); };
+        form.onsubmit = async (e) => {
+          e.preventDefault();
+          const name = input.value.trim();
+          const len = [...name].length;
+          if (len < 1 || len > 20) { toast('姓名需 1–20 个字'); return; }
+          try {
+            const r = await api(`/api/admin/members/${id}/name`, { method: 'PUT', body: { displayName: name } });
+            closeEdit();
+            toast(r.changed ? '姓名已修改' : '姓名未变化');
             refreshAdminTab();
           } catch (ex) { toast(ex.message); }
         };
@@ -793,7 +837,7 @@
     ok: '登录成功', ok_2fa: '登录成功（2FA）', register: '注册', bad_password: '密码错误', no_user: '账号不存在',
     bad_totp: '验证码错误', locked: '已锁定', disabled: '账号停用', pw_changed: '修改密码',
     pw_change_bad_current: '改密失败', '2fa_enabled': '开启2FA', '2fa_disabled': '关闭2FA',
-    '2fa_reset_by_admin': '管理员重置2FA', forced_logout_by_admin: '被强制下线', unlocked_by_admin: '管理员解锁', logout_others: '退出其他设备',
+    '2fa_reset_by_admin': '管理员重置2FA', forced_logout_by_admin: '被强制下线', unlocked_by_admin: '管理员解锁', display_name_changed: '修改姓名', logout_others: '退出其他设备',
   };
 
   async function renderSecurityTab() {
@@ -819,7 +863,7 @@
                 <tr>
                   <td class="muted-sm">${formatTime(a.createdAt)}</td>
                   <td>${escapeHtml(a.username)}</td>
-                  <td><span class="badge ${a.success ? 'badge-unused' : 'badge-revoked'}">${escapeHtml(AUDIT_REASON[a.reason] || a.reason || (a.success ? '成功' : '失败'))}</span></td>
+                  <td><span class="badge ${a.success ? 'badge-unused' : 'badge-revoked'}">${escapeHtml(AUDIT_REASON[a.reason] || a.reason || (a.success ? '成功' : '失败'))}</span>${a.detail ? `<div class="muted-sm">${escapeHtml(a.detail)}</div>` : ''}</td>
                   <td class="mono">${escapeHtml(a.ip)}</td>
                   <td title="${escapeHtml(a.userAgent)}">${escapeHtml(shortUA(a.userAgent))}</td>
                 </tr>`).join('') || '<tr><td colspan="5" class="empty">暂无记录</td></tr>'}
