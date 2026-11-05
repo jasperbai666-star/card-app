@@ -69,7 +69,8 @@ app.use(
       directives: {
         defaultSrc: ["'self'"],
         scriptSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'"], // inline style attributes used by the UI
+        // Dynamic UI uses style="" attributes; keep unsafe-inline for CSS only (never for scripts).
+        styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", 'data:'],
         fontSrc: ["'self'"],
         connectSrc: ["'self'", (req) => `wss://${req.headers.host}`, (req) => `ws://${req.headers.host}`],
@@ -77,14 +78,32 @@ app.use(
         baseUri: ["'none'"],
         formAction: ["'self'"],
         frameAncestors: ["'none'"],
+        workerSrc: ["'none'"],
+        manifestSrc: ["'self'"],
         upgradeInsecureRequests: SECURE_COOKIE ? [] : null,
       },
     },
-    hsts: SECURE_COOKIE ? { maxAge: 15552000, includeSubDomains: true } : false,
+    // 180 days + preload-ready when behind HTTPS (Render).
+    hsts: SECURE_COOKIE ? { maxAge: 15552000, includeSubDomains: true, preload: true } : false,
     crossOriginEmbedderPolicy: false,
-    referrerPolicy: { policy: 'same-origin' },
+    crossOriginOpenerPolicy: { policy: 'same-origin' },
+    crossOriginResourcePolicy: { policy: 'same-origin' },
+    referrerPolicy: { policy: 'no-referrer' },
+    frameguard: { action: 'deny' },
+    noSniff: true,
+    xssFilter: false, // obsolete; CSP is the real XSS control
+    permittedCrossDomainPolicies: { permittedPolicies: 'none' },
   })
 );
+// Deny powerful browser features (camera / mic / geo / payment / etc.).
+app.use((_req, res, next) => {
+  res.setHeader(
+    'Permissions-Policy',
+    'camera=(), microphone=(), geolocation=(), payment=(), usb=(), bluetooth=(), midi=(), ' +
+      'accelerometer=(), gyroscope=(), magnetometer=(), display-capture=(), interest-cohort=()'
+  );
+  next();
+});
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
   next();
@@ -140,6 +159,32 @@ app.get('/healthz', ah(async (_req, res) => {
   }
   res.json({ ok: true });
 }));
+
+/** Public privacy + security self-check (no secrets). */
+app.get('/api/security-policy', (_req, res) => {
+  const { SALT_ROUNDS } = require('./auth');
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json({
+    ok: true,
+    privacy: sec.PRIVACY_POLICY,
+    password: {
+      storage: 'bcrypt',
+      cost: SALT_ROUNDS,
+      minCost: 12,
+      plaintextStored: false,
+      logged: false,
+    },
+    headers: {
+      csp: 'strict self + style unsafe-inline (UI attributes only)',
+      hsts: !!SECURE_COOKIE,
+      referrerPolicy: 'no-referrer',
+      frameAncestors: 'none',
+      permissionsPolicy: 'camera/mic/geo/payment denied',
+      cookies: { httpOnly: true, sameSite: 'strict', secure: !!SECURE_COOKIE },
+    },
+    neverCollects: sec.PRIVACY_POLICY.neverCollects,
+  });
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- WebSocket ----------
@@ -505,6 +550,10 @@ async function establishSession(req, user) {
 }
 
 const limitJson = (msg) => (req, res) => res.status(429).json({ error: msg });
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: 40, standardHeaders: 'draft-7', legacyHeaders: false,
+  handler: limitJson('登录尝试过于频繁，请稍后再试'),
+});
 const registerLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false,
   handler: limitJson('注册尝试过于频繁，请 15 分钟后再试'),
@@ -578,7 +627,7 @@ app.post('/api/ws-token', requireAuth, ah(async (req, res) => {
 const GENERIC_LOGIN_ERR = '账号或密码错误';
 const LOCKED_ERR = `尝试次数过多，请 ${sec.LOCK_MINUTES} 分钟后再试`;
 
-app.post('/api/login', ah(async (req, res) => {
+app.post('/api/login', loginLimiter, ah(async (req, res) => {
   const { username, password, totp } = req.body || {};
   const uname = String(username || '').trim().slice(0, 64);
   if (!uname || !password) return res.status(400).json({ error: '请输入账号和密码' });
@@ -626,6 +675,8 @@ app.post('/api/logout', (req, res) => {
 });
 
 app.post('/api/register', registerLimiter, ah(async (req, res) => {
+  const forbid = sec.rejectForbiddenProfileFields(req.body);
+  if (forbid) return res.status(400).json({ error: forbid });
   const { username, password, inviteCode, displayName } = req.body || {};
   if (!username || !password || !inviteCode) {
     return res.status(400).json({ error: '请填写用户名、密码和邀请码' });
@@ -711,6 +762,8 @@ app.post('/api/my/suggestions', requireAuth, suggestionLimiter, ah(async (req, r
   if (req.user.role === 'admin') {
     return res.status(400).json({ error: '管理员无需提交建议' });
   }
+  const forbid = sec.rejectForbiddenProfileFields(req.body);
+  if (forbid) return res.status(400).json({ error: forbid });
   const { type, content } = req.body || {};
   if (!['suggestion', 'request'].includes(type)) {
     return res.status(400).json({ error: '类型须为 suggestion 或 request' });
@@ -719,6 +772,8 @@ app.post('/api/my/suggestions', requireAuth, suggestionLimiter, ah(async (req, r
   if (!text || text.length > 2000) {
     return res.status(400).json({ error: '内容不能为空且不超过 2000 字' });
   }
+  const sensitive = chat.looksLikeContactInfo(text);
+  if (sensitive) return res.status(400).json({ error: sensitive });
   const info = await db.run(
     `INSERT INTO suggestions (user_id, type, content) VALUES (?, ?, ?)`,
     req.user.id,
@@ -1944,6 +1999,8 @@ app.use((err, _req, res, _next) => {
 });
 
 async function start() {
+  const { SALT_ROUNDS } = require('./auth');
+  if (SALT_ROUNDS < 12) throw new Error('bcrypt cost must be >= 12');
   await db.init();
   await ensureAdmin();
   try { await jumpRooms.loadFromDb(db); } catch (e) { console.error('jump rooms warm', e.message); }

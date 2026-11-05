@@ -41,20 +41,45 @@ function generateAlias(role) {
 
 function looksLikeContactInfo(text) {
   const t = String(text || '');
+  const compact = t.replace(/[\s\-]/g, '');
+
+  // Explicit labels first
+  if (/(?:银行卡|信用卡|储蓄卡|卡号|cvv|cvc|支付密码)/i.test(t)) {
+    return '消息疑似包含银行卡号等支付敏感信息，本站绝不收集也不允许发送';
+  }
+  if (/(?:身份证|证件号|身份证号)/i.test(t)) {
+    return '消息疑似包含身份证号等敏感证件信息，本站绝不收集也不允许发送';
+  }
+
+  // PRC resident ID (18): region + YYYYMMDD + seq + check — before generic long digit runs
+  const idRe = /(?:^|[^0-9A-Za-z])([1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx])(?:[^0-9A-Za-z]|$)/;
+  if (idRe.test(t) || idRe.test(compact)) {
+    return '消息疑似包含身份证号等敏感证件信息，本站绝不收集也不允许发送';
+  }
+
+  // Bank / payment card-like 16–19 digit runs (not ID-shaped; no trailing X)
+  if (/(?:^|[^0-9])(\d(?:[ -]?\d){15,18})(?:[^0-9]|$)/.test(t)) {
+    const m = t.match(/(?:^|[^0-9])(\d(?:[ -]?\d){15,18})(?:[^0-9]|$)/);
+    const digits = (m && m[1] ? m[1] : '').replace(/\D/g, '');
+    const looksId = /^[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}$/.test(digits);
+    if (digits.length >= 16 && digits.length <= 19 && !looksId) {
+      return '消息疑似包含银行卡号等支付敏感信息，本站绝不收集也不允许发送';
+    }
+  }
+
   // emails
   if (/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i.test(t)) {
-    return '消息疑似包含邮箱地址，匿名聊天室禁止交换联系方式';
+    return '消息疑似包含邮箱地址，本站禁止收集或交换联系方式与敏感信息';
   }
-  // China mobile / landline-ish digit runs
-  if (/(?:\+?86[-\s]?)?1[3-9]\d{9}/.test(t.replace(/[\s\-]/g, ''))) {
-    return '消息疑似包含手机号码，匿名聊天室禁止交换联系方式';
+  // China mobile (bounded)
+  if (/(?:^|[^0-9])(?:\+?86)?1[3-9]\d{9}(?:[^0-9]|$)/.test(compact)) {
+    return '消息疑似包含手机号码，本站禁止收集或交换联系方式与敏感信息';
   }
   if (/(?:微信|weixin|wechat|wx|qq|扣扣|企鹅号)\s*[:：=是]?\s*[a-zA-Z][a-zA-Z0-9_-]{5,19}/i.test(t)) {
-    return '消息疑似包含微信号或其他联系方式，匿名聊天室禁止交换联系方式';
+    return '消息疑似包含微信号或其他联系方式，本站禁止收集或交换联系方式与敏感信息';
   }
-  // bare wechat-like ids after 加/找
   if (/(?:加|找|联系)(?:我|下)?(?:的)?(?:微信|vx|wx)\s*[a-zA-Z0-9_-]{6,20}/i.test(t)) {
-    return '消息疑似包含联系方式，匿名聊天室禁止交换联系方式';
+    return '消息疑似包含联系方式，本站禁止收集或交换联系方式与敏感信息';
   }
   return null;
 }

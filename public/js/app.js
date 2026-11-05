@@ -206,6 +206,12 @@
               ? `已有账号？ <a href="#" id="switch">去登录</a>`
               : `有邀请码？ <a href="#" id="switch">注册加入</a>`}
           </div>
+          <aside class="privacy-note" aria-label="隐私与安全">
+            <strong>隐私与安全</strong>
+            <p>本站<strong>不收集</strong>银行卡、身份证、手机号、邮箱等支付/敏感信息，也无任何付费或绑卡功能。</p>
+            <p>登录密码仅用于验证身份，服务端只保存 <strong>bcrypt 加密哈希</strong>，不明文存储、不写入日志。</p>
+            <p>匿名聊天对成员隐藏真实身份；禁止发送联系方式或卡号/证件号。管理员可处理违规内容。</p>
+          </aside>
         </div>
       </div>
     `;
@@ -262,6 +268,7 @@
         <div class="grid-2">
           <div class="panel" id="pwPanel">
             <h2>修改密码</h2>
+            <p class="privacy-note inline">密码只会用于验证，服务端仅保存加密哈希；本站永不收集银行卡等支付信息。</p>
             <form id="pwForm">
               <label>当前密码</label>
               <input name="currentPassword" type="password" required maxlength="72" autocomplete="current-password" />
@@ -496,6 +503,16 @@
 
             <section class="mp-pane ${tab === 'me' ? '' : 'hidden'}" data-pane="me" id="paneMe">
               <div class="mp-grid">
+                <section class="mp-glass mp-wide privacy-card" aria-label="隐私与安全">
+                  <div class="mp-head"><h2>隐私与安全</h2><span class="mp-chip gold">最高防护</span></div>
+                  <ul class="privacy-list">
+                    <li>不收集银行卡、信用卡、支付信息、身份证号、手机号、邮箱或住址。</li>
+                    <li>登录密码仅以 bcrypt 哈希保存（成本 ≥ 12），不明文存储，也不记入审计日志。</li>
+                    <li>会话 Cookie：HttpOnly + SameSite=Strict（生产环境 Secure）；改密或「退出其他设备」会使其他会话失效。</li>
+                    <li>匿名聊天隐藏真实身份；发送卡号/证件号/手机号/邮箱会被拒绝。</li>
+                    <li>无付费、无绑卡；管理员仅可管理违规内容与账号安全。</li>
+                  </ul>
+                </section>
                 <section class="mp-glass mp-wide mp-achievements" id="achievementsPanel">
                   <div class="mp-head">
                     <h2>成就勋章</h2>

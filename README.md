@@ -130,10 +130,16 @@ BASE_URL=... ADMIN_USERNAME=admin ADMIN_PASSWORD=... node scripts/security-scree
 
 ## 安全说明
 
+**隐私承诺（不收集敏感信息）**
+- **绝不收集**银行卡 / 信用卡 / 支付信息、身份证号、手机号、邮箱、住址；系统无付费、无绑卡字段。
+- 登录密码是账号必需的：服务端**只保存 bcrypt 哈希（cost ≥ 12）**，不明文存储，也不写入审计日志或控制台。
+- 匿名聊天会拦截疑似手机号、邮箱、微信号、银行卡号、身份证号等内容；注册接口拒绝 `phone` / `bankCard` 等敏感字段名。
+- 公开接口 `GET /api/security-policy` 可查看隐私摘要与安全自检（不含任何密钥）。
+
 **登录防护**
 - 同一账号连续 5 次登录失败锁定 15 分钟；同一 IP 累计 10 次失败也会锁定 15 分钟（管理员可在「安全中心」解除某个账号的锁定）
 - 错误提示统一为「账号或密码错误」，不暴露账号是否存在；不存在的账号也会走一遍 bcrypt，防止靠响应时间猜账号
-- 注册接口每 IP 15 分钟最多 10 次；建议提交每人 10 分钟最多 10 条；改密码/2FA 操作也有限流
+- 登录 / 注册均有 IP 限流；建议提交、聊天、上传、改密码/2FA、游戏成绩均有独立限流
 
 **两步验证（2FA，可选）**
 1. 登录后点右上角「安全设置」→「两步验证」→「开始设置」
@@ -154,10 +160,11 @@ BASE_URL=... ADMIN_USERNAME=admin ADMIN_PASSWORD=... node scripts/security-scree
 **邀请码**：可设置有效期（1 天 / 3 天 / 7 天(默认) / 30 天 / 永久）和备注，过期自动失效
 
 **其他**
-- 密码 bcrypt（cost 12）哈希存储，最少 8 位
-- helmet 安全响应头：严格 CSP（只允许本站脚本）、禁止被嵌入 iframe、HSTS、nosniff 等；字体本地托管，不依赖 Google
+- 密码 bcrypt（cost ≥ 12）哈希存储，最少 8 位；启动时若 cost 过低会拒绝开机
+- helmet 安全响应头：严格 CSP（`script-src 'self'`，禁止 `unsafe-eval`；样式因 UI 属性允许 `unsafe-inline`）、`frame-ancestors 'none'` / `X-Frame-Options: DENY`、生产环境 HSTS（含 preload）、`nosniff`、`Referrer-Policy: no-referrer`、`Permissions-Policy` 禁用相机/麦克风/定位/支付、`Cross-Origin-Opener-Policy: same-origin`；字体本地托管，无 CDN
+- Cookie：`HttpOnly` + `SameSite=Strict` + 生产 `Secure`；登录轮换 Session ID
 - CSRF 防护：所有写操作必须来自本站（校验 Origin/Referer）且为 JSON 请求；WebSocket 也校验来源
-- 所有用户输入在页面上都会转义显示（防 XSS），并限制长度
+- 所有用户输入在页面上都会转义显示（防 XSS），并限制长度；图片仅 JPG/PNG/WebP/GIF，拒 SVG/HTML
 ## 开发脚本
 
 ```bash

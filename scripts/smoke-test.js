@@ -56,9 +56,21 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
   let r = await fetch(BASE + '/login');
   const csp = r.headers.get('content-security-policy') || '';
   check('CSP header present (script-src self, frame-ancestors none)', /script-src 'self'/.test(csp) && /frame-ancestors 'none'/.test(csp), csp);
+  check('CSP has no unsafe-eval', !/unsafe-eval/.test(csp), csp);
   check('X-Content-Type-Options nosniff', r.headers.get('x-content-type-options') === 'nosniff');
+  check('Referrer-Policy no-referrer', (r.headers.get('referrer-policy') || '') === 'no-referrer');
+  check('X-Frame-Options DENY', /deny/i.test(r.headers.get('x-frame-options') || ''));
+  const pp = r.headers.get('permissions-policy') || '';
+  check('Permissions-Policy denies camera/mic/geo/payment',
+    /camera=\(\)/.test(pp) && /microphone=\(\)/.test(pp) && /geolocation=\(\)/.test(pp) && /payment=\(\)/.test(pp), pp);
+  check('Cross-Origin-Opener-Policy same-origin', (r.headers.get('cross-origin-opener-policy') || '') === 'same-origin');
   if (HTTPS) check('HSTS header', /max-age=/.test(r.headers.get('strict-transport-security') || ''));
   check('no X-Powered-By', !r.headers.get('x-powered-by'));
+  r = await fetch(BASE + '/api/security-policy');
+  const pol = r.status === 200 ? await r.json() : {};
+  check('security-policy endpoint', r.status === 200 && pol.ok && pol.password?.plaintextStored === false && (pol.password?.cost || 0) >= 12, JSON.stringify(pol).slice(0, 240));
+  check('security-policy neverCollects bank/phone',
+    Array.isArray(pol.neverCollects) && pol.neverCollects.includes('bank_card') && pol.neverCollects.includes('phone'));
 
   // --- admin ---
   r = await login(admin, AU, AP);
@@ -104,6 +116,10 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
   check('password < 8 chars rejected', r.status === 400);
   r = await api(mA, 'POST', '/api/register', { username: ua, password: PW, inviteCode: codeA, displayName: '名'.repeat(21) });
   check('register: display name > 20 chars rejected', r.status === 400);
+  r = await api({}, 'POST', '/api/register', { username: 'forbid_' + sfx, password: PW, inviteCode: codeA, phone: '13800138000' });
+  check('register rejects phone field', r.status === 400 && /不收集|敏感/.test(r.data.error || ''), r.data.error);
+  r = await api({}, 'POST', '/api/register', { username: 'forbid2_' + sfx, password: PW, inviteCode: codeA, bankCard: '6222021234567890' });
+  check('register rejects bankCard field', r.status === 400 && /不收集|敏感|银行卡/.test(r.data.error || ''), r.data.error);
   r = await api(mA, 'POST', '/api/register', { username: ua, password: PW, inviteCode: codeA, displayName: XSS_NAME });
   const idA = r.data.user?.id; if (idA) created.members.push(idA);
   check('member A registers', r.status === 200 && idA, JSON.stringify(r.data));
@@ -238,6 +254,12 @@ const waitFor = (msgs, pred, ms = 10000) => new Promise((res) => {
     check('chat: wechat-like text blocked', r.status === 400 && /联系方式|微信/.test(r.data.error || ''));
     r = await api(mA, 'POST', '/api/chat/messages', { text: 'mail me at a@b.com please' });
     check('chat: email blocked', r.status === 400);
+    r = await api(mA, 'POST', '/api/chat/messages', { text: '我的卡号 6222021234567890123' });
+    check('chat: bank-card-like digits blocked', r.status === 400 && /银行卡|支付|敏感/.test(r.data.error || ''), r.data.error);
+    r = await api(mA, 'POST', '/api/chat/messages', { text: '身份证 11010519491231002X' });
+    check('chat: id-card-like blocked', r.status === 400 && /身份证|敏感/.test(r.data.error || ''), r.data.error);
+    r = await api(mA, 'POST', '/api/chat/messages', { text: '分数 12345 没问题' });
+    check('chat: short digit run still allowed', r.status === 200, JSON.stringify(r.data).slice(0, 120));
     r = await api(mA, 'POST', '/api/chat/messages', { text: 'x'.repeat(501) });
     check('chat: oversized text rejected', r.status === 400);
     const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');

@@ -68,11 +68,21 @@ async function clearFailures(username, ip) {
 }
 
 // ---------- audit ----------
+/** Strip anything that might be a secret before persisting audit detail. */
+function scrubAuditDetail(detail) {
+  if (detail == null) return null;
+  let s = String(detail);
+  s = s.replace(/password[^\s]*/gi, '[redacted]');
+  s = s.replace(/\b(?:\d[ -]?){12,19}\d\b/g, '[redacted-digits]');
+  s = s.replace(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi, '[redacted-email]');
+  return clip(s, 200);
+}
+
 async function audit(req, { username, userId = null, success, reason, detail = null }) {
   try {
     await db.run(
       'INSERT INTO login_audit (username, user_id, ip, user_agent, success, reason, detail) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      clip(username, 64), userId, clip(req.ip, 64), clip(req.get('user-agent'), 300), success ? 1 : 0, clip(reason, 64), clip(detail, 200)
+      clip(username, 64), userId, clip(req.ip, 64), clip(req.get('user-agent'), 300), success ? 1 : 0, clip(reason, 64), scrubAuditDetail(detail)
     );
   } catch (e) {
     console.error('audit failed', e.message);
@@ -178,6 +188,40 @@ function normalizeDisplayName(v) {
   return { ok: true, name };
 }
 
+
+/** Body keys this app must never accept (no payment / PII collection). */
+const FORBIDDEN_PROFILE_KEYS = Object.freeze([
+  'phone', 'mobile', 'tel', 'email', 'mail',
+  'bankCard', 'bank_card', 'cardNumber', 'card_number', 'creditCard', 'credit_card',
+  'idCard', 'id_card', 'idNumber', 'id_number', 'nationalId',
+  'address', 'addr', 'payment', 'cvv', 'cvc', 'iban',
+]);
+
+function rejectForbiddenProfileFields(body) {
+  if (!body || typeof body !== 'object') return null;
+  for (const k of Object.keys(body)) {
+    const key = String(k);
+    if (FORBIDDEN_PROFILE_KEYS.includes(key) ||
+        /^(bank|credit|debit|payment|phone|mobile|email|id.?card|身份证|银行卡)/i.test(key)) {
+      return '本站不收集银行卡、身份证、手机号、邮箱等敏感信息，请勿提交此类字段';
+    }
+  }
+  return null;
+}
+
+const PRIVACY_POLICY = Object.freeze({
+  zh: [
+    '本站不收集银行卡、信用卡、支付信息、身份证号、手机号、邮箱或住址。',
+    '登录密码仅用于身份验证，服务端只保存 bcrypt 加密哈希，不明文存储、不记入日志。',
+    '匿名聊天对成员隐藏真实身份；禁止在聊天中发送联系方式或支付/证件类敏感信息。',
+    '管理员可管理违规内容与账号安全；无任何付费或绑卡功能。',
+  ],
+  collects: [],
+  neverCollects: ['bank_card', 'payment', 'id_card', 'phone', 'email', 'address'],
+  passwordStorage: 'bcrypt',
+  bcryptCostMin: 12,
+});
+
 module.exports = {
   normalizeDisplayName,
   nowText, clip,
@@ -186,4 +230,5 @@ module.exports = {
   trackSession, touchSession, killUserSessions,
   csrfGuard, originOk, allowedOrigins,
   newTotpSecret, totpUri, verifyTotp,
+  FORBIDDEN_PROFILE_KEYS, rejectForbiddenProfileFields, PRIVACY_POLICY, scrubAuditDetail,
 };

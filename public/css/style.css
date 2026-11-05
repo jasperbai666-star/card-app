@@ -1037,3 +1037,30 @@ html.gg-noscroll, html.gg-noscroll body {
 /* Admin tabs wrap nicer on narrow */
 /* Admin tabs wrap nicer on narrow */
 .tabs { row-gap: 8px; }
+
+/* ---------- Privacy & security note ---------- */
+.privacy-note {
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid rgba(212, 175, 55, 0.28);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  text-align: left;
+}
+.privacy-note strong { color: var(--gold, #d4af37); font-weight: 600; }
+.privacy-note p { margin: 6px 0 0; }
+.privacy-note.inline {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+}
+.privacy-card .privacy-list {
+  margin: 0;
+  padding-left: 1.15rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.65;
+}
+.privacy-card .privacy-list li { margin: 4px 0; }
