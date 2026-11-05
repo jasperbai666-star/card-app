@@ -366,107 +366,123 @@
       </table></div>`;
   }
 
-  // ---------- Member ----------
+  // ---------- Member (premium) ----------
+  const REDUCED_MOTION = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
   function renderMember() {
     history.replaceState(null, '', '/member');
+    const name = state.user.displayName || state.user.username;
     app.innerHTML = `
-      <div class="shell">
-        <div class="topbar">
-          <div>
-            <h1 class="glow-title" style="font-size:1.2rem">我的卡牌</h1>
-            <div class="who"><span class="live-dot ${state.wsConnected ? '' : 'off'}"></span><span class="who-name">${escapeHtml(state.user.displayName || state.user.username)}</span></div>
+      <div class="shell mp">
+        <header class="mp-top">
+          <div class="mp-brand">
+            <div class="mp-logo" aria-hidden="true">♠</div>
+            <div>
+              <div class="mp-eyebrow">PRIVATE MEMBER</div>
+              <div class="who mp-who"><span class="live-dot ${state.wsConnected ? '' : 'off'}"></span><span class="who-name">${escapeHtml(name)}</span></div>
+            </div>
           </div>
-          <div class="row-actions">
-            <button class="btn btn-ghost btn-sm" id="settingsBtn">安全设置</button>
-            <button class="btn btn-ghost btn-sm" id="logoutBtn">退出登录</button>
+          <div class="mp-actions">
+            <button class="mp-icon-btn" id="settingsBtn" title="安全设置" aria-label="安全设置">⚙<span>安全</span></button>
+            <button class="mp-icon-btn" id="logoutBtn" title="退出登录" aria-label="退出登录">⏻<span>退出</span></button>
           </div>
-        </div>
-        <div class="panel member-hero">
-          <div id="myCard"></div>
-          <p class="hint">仅你可见 · 管理员变更后将实时刷新</p>
-          <p class="hint" id="myInviter">邀请人：…</p>
-        </div>
-        <div class="panel">
-          <h2>我的邀请码</h2>
-          <p class="hint">每人同时只能有 <strong>1 个</strong>有效邀请码（7 天有效）。它被使用、过期或你主动撤销后，才能再生成新的。</p>
-          <div id="myInvite"><div class="empty">加载中…</div></div>
-        </div>
-        <div class="grid-2">
-          <div class="panel">
-            <h2>提交建议 / 要求</h2>
-            <form id="sugForm">
-              <label>类型</label>
-              <select name="type">
-                <option value="suggestion">建议</option>
-                <option value="request">要求</option>
-              </select>
-              <label>内容</label>
-              <textarea name="content" placeholder="写给管理员的内容…" required maxlength="2000"></textarea>
-              <button class="btn btn-primary" type="submit">提交</button>
+        </header>
+
+        <section class="mp-hero">
+          <div class="mp-stage" id="cardStage">
+            <div class="mp-aura" aria-hidden="true"></div>
+            <div id="myCard" class="mp-card-slot"></div>
+          </div>
+          <div class="mp-cardinfo" id="cardInfo">
+            <div class="mp-skel"></div>
+          </div>
+          <p class="mp-note"><span class="mp-lock">🔒</span> 仅你可见 · 管理员调整后实时同步</p>
+        </section>
+
+        <div class="mp-grid">
+          <section class="mp-glass mp-inviter">
+            <div class="mp-label">我的邀请人</div>
+            <div class="mp-person" id="myInviter"><span class="mp-skel sm"></span></div>
+          </section>
+
+          <section class="mp-glass">
+            <div class="mp-head">
+              <h2>我的邀请码</h2>
+              <span class="mp-chip">每人限 1 个</span>
+            </div>
+            <div id="myInvite"><div class="mp-skel"></div></div>
+            <p class="mp-fine">同一时间只能持有 1 个有效邀请码（7 天有效）。被使用、过期或撤销后，才可生成新的。</p>
+          </section>
+
+          <section class="mp-glass">
+            <div class="mp-head"><h2>我邀请的成员</h2><span class="mp-chip" id="invitedCount">0</span></div>
+            <div id="myInvited"><div class="mp-skel"></div></div>
+          </section>
+
+          <section class="mp-glass mp-wide">
+            <div class="mp-head"><h2>致管理员</h2><span class="mp-chip gold">建议 / 要求</span></div>
+            <form id="sugForm" class="mp-form">
+              <div class="mp-seg" role="radiogroup" aria-label="类型">
+                <label><input type="radio" name="type" value="suggestion" checked /><span>💡 建议</span></label>
+                <label><input type="radio" name="type" value="request" /><span>📌 要求</span></label>
+              </div>
+              <div class="mp-textarea">
+                <textarea name="content" placeholder="写给管理员的内容…" required maxlength="2000" rows="4"></textarea>
+                <span class="mp-count" id="sugCount">0 / 2000</span>
+              </div>
+              <button class="mp-btn gold" type="submit">提交给管理员</button>
             </form>
-          </div>
-          <div class="panel">
-            <h2>我的提交记录</h2>
-            <div id="mySugs"></div>
-          </div>
+          </section>
+
+          <section class="mp-glass mp-wide">
+            <div class="mp-head"><h2>我的提交记录</h2></div>
+            <div id="mySugs"><div class="mp-skel"></div></div>
+          </section>
         </div>
       </div>
     `;
     document.getElementById('logoutBtn').onclick = logout;
     document.getElementById('settingsBtn').onclick = renderSettings;
-    document.getElementById('sugForm').onsubmit = async (e) => {
+    const form = document.getElementById('sugForm');
+    const ta = form.querySelector('textarea');
+    ta.oninput = () => { document.getElementById('sugCount').textContent = `${ta.value.length} / 2000`; };
+    form.onsubmit = async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
+      const btn = form.querySelector('button[type=submit]');
+      btn.disabled = true;
       try {
         await api('/api/my/suggestions', {
           method: 'POST',
           body: { type: fd.get('type'), content: fd.get('content') },
         });
         e.target.reset();
-        toast('已提交');
+        ta.oninput();
+        toast('✓ 已送达管理员');
         loadMySuggestions();
       } catch (ex) {
         toast(ex.message);
-      }
+      } finally { btn.disabled = false; }
     };
+    setupTilt(document.getElementById('cardStage'));
     loadMyCard();
     loadMySuggestions();
     loadMyInvite();
   }
 
-  async function loadMyInvite() {
-    const box = document.getElementById('myInvite');
-    const who = document.getElementById('myInviter');
-    if (!box) return;
-    try {
-      const r = await api('/api/my/invite');
-      if (who) who.textContent = '邀请人：' + (r.invitedBy ? r.invitedBy.name : '未知');
-      const inv = r.invite && r.invite.status === 'unused' ? r.invite : null;
-      const list = r.invitedMembers.length
-        ? `<p class="hint">我邀请的成员：${r.invitedMembers.map((m) => escapeHtml(m.displayName)).join('、')}</p>` : '';
-      box.innerHTML = inv
-        ? `<div class="form-inline"><span class="mono" style="font-size:1.3rem;letter-spacing:2px">${escapeHtml(inv.code)}</span>
-             <span class="muted-sm">有效期至 ${formatTime(inv.expiresAt)}</span>
-             <button class="btn btn-ghost btn-sm" id="copyInv">复制</button>
-             <button class="btn btn-danger btn-sm" id="revokeInv">撤销</button></div>
-           <p class="hint">当前已有 1 个未使用的邀请码，需等它被使用或撤销后才能生成新的。</p>${list}`
-        : `<button class="btn btn-primary btn-sm" id="genInv">生成邀请码</button>${list}`;
-      const g = document.getElementById('genInv');
-      if (g) g.onclick = async () => {
-        try { await api('/api/my/invite', { method: 'POST', body: {} }); toast('已生成邀请码'); } catch (ex) { toast(ex.message); }
-        loadMyInvite();
-      };
-      const rv = document.getElementById('revokeInv');
-      if (rv) rv.onclick = async () => {
-        if (!confirm('确定撤销这个邀请码？撤销后它将无法再使用。')) return;
-        try { await api('/api/my/invite/revoke', { method: 'POST', body: {} }); toast('已撤销'); } catch (ex) { toast(ex.message); }
-        loadMyInvite();
-      };
-      const cp = document.getElementById('copyInv');
-      if (cp) cp.onclick = () => navigator.clipboard?.writeText(inv.code).then(() => toast('已复制'), () => toast(inv.code));
-    } catch (ex) {
-      box.innerHTML = `<div class="empty">${escapeHtml(ex.message)}</div>`;
-    }
+  function setupTilt(stage) {
+    if (!stage || REDUCED_MOTION) return;
+    const reset = () => { stage.style.setProperty('--rx', '0deg'); stage.style.setProperty('--ry', '0deg'); stage.style.setProperty('--mx', '50%'); stage.style.setProperty('--my', '30%'); };
+    stage.addEventListener('pointermove', (e) => {
+      const r = stage.getBoundingClientRect();
+      const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+      stage.style.setProperty('--ry', `${(x - 0.5) * 18}deg`);
+      stage.style.setProperty('--rx', `${(0.5 - y) * 14}deg`);
+      stage.style.setProperty('--mx', `${x * 100}%`);
+      stage.style.setProperty('--my', `${y * 100}%`);
+    });
+    stage.addEventListener('pointerleave', reset);
+    reset();
   }
 
   async function loadMyCard() {
@@ -478,9 +494,94 @@
     }
   }
 
+  function premiumCardHtml(card) {
+    if (!card) {
+      return `<div class="pc pc-empty"><div class="pc-back"><div class="pc-back-mark">♠</div><div class="pc-back-txt">等待发牌</div></div></div>`;
+    }
+    const sheen = '<div class="pc-sheen" aria-hidden="true"></div>';
+    if (card.isJoker) {
+      const small = card.rank === 'joker_small';
+      return `<div class="pc pc-joker ${small ? 'small' : 'big'}">
+        <div class="pc-jk-corner">JOKER</div>
+        <div class="pc-jk-art">${small ? '🃏' : '👑'}</div>
+        <div class="pc-jk-tag">${escapeHtml(card.label)}</div>
+        <div class="pc-jk-corner br">JOKER</div>${sheen}</div>`;
+    }
+    const color = card.color === 'red' ? 'red' : 'black';
+    const corner = `<span class="r">${escapeHtml(card.label)}</span><span class="s">${card.symbol}</span>`;
+    return `<div class="pc pc-${color}">
+      <div class="pc-corner">${corner}</div>
+      <div class="pc-center"><span>${card.symbol}</span></div>
+      <div class="pc-corner br">${corner}</div>${sheen}</div>`;
+  }
+
   function renderMemberCard(card, flip) {
     const el = document.getElementById('myCard');
-    if (el) CardsUI.render(el, card, { flip });
+    const info = document.getElementById('cardInfo');
+    if (!el) return;
+    const apply = () => {
+      el.innerHTML = premiumCardHtml(card);
+      if (info) {
+        info.innerHTML = card
+          ? `<div class="mp-rank">${escapeHtml(card.isJoker ? card.label : (card.suitLabel || '') + card.label)}</div>
+             <div class="mp-level"><span>LEVEL</span><strong>${Number(card.level)}</strong><span>/ 15</span></div>
+             <div class="mp-bar"><i style="width:${Math.round((Number(card.level) / 15) * 100)}%"></i></div>`
+          : `<div class="mp-rank muted">尚未分配卡牌</div><div class="mp-fine">管理员发牌后，这里会实时亮起。</div>`;
+      }
+    };
+    if (flip && !REDUCED_MOTION) {
+      el.classList.remove('pc-in'); el.classList.add('pc-out');
+      setTimeout(() => { apply(); el.classList.remove('pc-out'); void el.offsetWidth; el.classList.add('pc-in'); }, 320);
+    } else {
+      apply();
+    }
+  }
+
+  async function loadMyInvite() {
+    const box = document.getElementById('myInvite');
+    const who = document.getElementById('myInviter');
+    const invitedBox = document.getElementById('myInvited');
+    if (!box) return;
+    try {
+      const r = await api('/api/my/invite');
+      if (who) {
+        const ib = r.invitedBy;
+        const nm = ib ? ib.name : '未知';
+        who.innerHTML = `<span class="mp-avatar ${ib && ib.role === 'admin' ? 'gold' : ''}">${escapeHtml((nm || '?').slice(0, 1))}</span>
+          <span class="mp-person-name">${escapeHtml(nm)}</span>${ib && ib.role === 'admin' ? '<span class="mp-chip gold">管理员</span>' : ''}`;
+      }
+      if (invitedBox) {
+        document.getElementById('invitedCount').textContent = String(r.invitedMembers.length);
+        invitedBox.innerHTML = r.invitedMembers.length
+          ? `<ul class="mp-list">${r.invitedMembers.map((m) => `<li><span class="mp-avatar">${escapeHtml(m.displayName.slice(0, 1))}</span><span>${escapeHtml(m.displayName)}</span><span class="mp-time">${formatTime(m.createdAt)}</span></li>`).join('')}</ul>`
+          : `<div class="mp-empty"><div class="mp-empty-ico">✦</div><div>还没有邀请任何人</div><div class="mp-fine">生成邀请码发给朋友，他们加入后会出现在这里。</div></div>`;
+      }
+      const inv = r.invite && r.invite.status === 'unused' ? r.invite : null;
+      box.innerHTML = inv
+        ? `<div class="mp-ticket">
+             <div class="mp-ticket-code mono">${escapeHtml(inv.code)}</div>
+             <div class="mp-fine">有效期至 ${formatTime(inv.expiresAt)}</div>
+             <div class="mp-row"><button class="mp-btn gold sm" id="copyInv">复制邀请码</button><button class="mp-btn ghost danger sm" id="revokeInv">撤销</button></div>
+           </div>`
+        : `<div class="mp-empty"><div class="mp-empty-ico">✉</div><div>当前没有有效邀请码</div>
+             <button class="mp-btn gold sm" id="genInv">生成邀请码</button></div>`;
+      const g = document.getElementById('genInv');
+      if (g) g.onclick = async () => {
+        g.disabled = true;
+        try { await api('/api/my/invite', { method: 'POST', body: {} }); toast('✓ 已生成邀请码'); } catch (ex) { toast(ex.message); }
+        loadMyInvite();
+      };
+      const rv = document.getElementById('revokeInv');
+      if (rv) rv.onclick = async () => {
+        if (!confirm('确定撤销这个邀请码？撤销后它将无法再使用。')) return;
+        try { await api('/api/my/invite/revoke', { method: 'POST', body: {} }); toast('已撤销'); } catch (ex) { toast(ex.message); }
+        loadMyInvite();
+      };
+      const cp = document.getElementById('copyInv');
+      if (cp) cp.onclick = () => navigator.clipboard?.writeText(inv.code).then(() => toast('✓ 已复制'), () => toast(inv.code));
+    } catch (ex) {
+      box.innerHTML = `<div class="mp-empty">${escapeHtml(ex.message)}</div>`;
+    }
   }
 
   async function loadMySuggestions() {
@@ -489,22 +590,21 @@
     try {
       const { suggestions } = await api('/api/my/suggestions');
       if (!suggestions.length) {
-        box.innerHTML = '<div class="empty">暂无记录</div>';
+        box.innerHTML = '<div class="mp-empty"><div class="mp-empty-ico">✎</div><div>暂无提交记录</div><div class="mp-fine">你的建议和要求会在这里显示处理进度。</div></div>';
         return;
       }
-      box.innerHTML = suggestions.map((s) => `
-        <div style="padding:10px 0;border-bottom:1px solid rgba(255,255,255,.06)">
-          <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
-            <strong>${s.type === 'request' ? '要求' : '建议'}</strong>
+      box.innerHTML = `<ul class="mp-sugs">${suggestions.map((s) => `
+        <li class="${s.status === 'pending' ? 'pending' : 'done'}">
+          <div class="mp-sug-head">
+            <span class="mp-chip">${s.type === 'request' ? '📌 要求' : '💡 建议'}</span>
             <span class="badge ${s.status === 'pending' ? 'badge-pending' : 'badge-handled'}">${s.status === 'pending' ? '待处理' : '已处理'}</span>
           </div>
-          <div style="margin:6px 0;white-space:pre-wrap">${escapeHtml(s.content)}</div>
-          <div style="font-size:.78rem;color:var(--muted)">${formatTime(s.createdAt)}</div>
-          ${s.adminReply ? `<div style="margin-top:6px;color:var(--neon);font-size:.9rem">回复：${escapeHtml(s.adminReply)}</div>` : ''}
-        </div>
-      `).join('');
+          <div class="mp-sug-body">${escapeHtml(s.content)}</div>
+          <div class="mp-time">${formatTime(s.createdAt)}</div>
+          ${s.adminReply ? `<div class="mp-reply"><span>管理员回复</span>${escapeHtml(s.adminReply)}</div>` : ''}
+        </li>`).join('')}</ul>`;
     } catch (ex) {
-      box.innerHTML = `<div class="empty">${escapeHtml(ex.message)}</div>`;
+      box.innerHTML = `<div class="mp-empty">${escapeHtml(ex.message)}</div>`;
     }
   }
 
