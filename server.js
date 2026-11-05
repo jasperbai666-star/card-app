@@ -36,6 +36,24 @@ const SECURE_COOKIE =
 // Behind Render / Nginx reverse proxy
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
 
+// Real client IP. Render sits behind Cloudflare + an internal load balancer, so req.ip (from
+// X-Forwarded-For hop counting) is an internal 10.x address. Cloudflare overwrites
+// CF-Connecting-IP / True-Client-IP with the real visitor IP, so those can't be spoofed there.
+const CLIENT_IP_HEADERS = String(
+  process.env.CLIENT_IP_HEADER ?? (process.env.RENDER ? 'cf-connecting-ip,true-client-ip' : '')
+).split(',').map((h) => h.trim().toLowerCase()).filter(Boolean);
+const IP_RE = /^[0-9a-fA-F:.]{3,45}$/;
+app.use((req, _res, next) => {
+  for (const h of CLIENT_IP_HEADERS) {
+    const v = String(req.headers[h] || '').trim();
+    if (v && IP_RE.test(v)) {
+      Object.defineProperty(req, 'ip', { value: v, configurable: true });
+      break;
+    }
+  }
+  next();
+});
+
 /** Wrap async route handlers so errors reach Express. */
 const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 

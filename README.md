@@ -104,7 +104,7 @@ server {
 | `SESSION_SECRET` | 随机长字符串 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | 管理员账号；**只在第一次创建管理员时使用**，之后在网页「安全设置」里改的密码不会被覆盖 |
 | `ADMIN_PASSWORD_FORCE_RESET` | 设为 `true` 时，下次启动把管理员密码重置为 `ADMIN_PASSWORD`、清除管理员 2FA，并踢下线所有管理员会话（忘记密码时用，用完请删除此变量） |
-| `TRUST_PROXY_HOPS` | 前面有几层反向代理（默认 1，Render 用默认即可），用于取得真实访客 IP |
+| `TRUST_PROXY_HOPS` / `CLIENT_IP_HEADER` | 取真实访客 IP 的方式。Render 上默认读 Cloudflare 的 `CF-Connecting-IP`；自建服务器按反向代理层数设 `TRUST_PROXY_HOPS`（默认 1） |
 | `ALLOWED_ORIGINS` | 可选，额外允许的来源（逗号分隔，如自定义域名 `https://cards.example.com`） |
 | `LOGIN_MAX_FAILS_PER_USER` / `LOGIN_MAX_FAILS_PER_IP` / `LOGIN_LOCK_MINUTES` | 可选，默认每账号 5 次、每 IP 10 次失败锁定 15 分钟 |
 | `NODE_VERSION` | `22` |
